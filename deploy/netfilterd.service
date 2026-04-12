@@ -1,0 +1,14 @@
+[Unit]
+Description=NetFilter - RPi Network Filter Router
+After=network.target hostapd.service dnsmasq.service nftables.service
+Wants=hostapd.service dnsmasq.service nftables.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/netfilterd --config /etc/netfilterd/config.yaml
+Restart=always
+RestartSec=5
+WorkingDirectory=/var/lib/netfilterd
+
+[Install]
+WantedBy=multi-user.target

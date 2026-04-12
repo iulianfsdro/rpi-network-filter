@@ -1,0 +1,164 @@
+{{define "title"}}Firewall Rules{{end}}
+
+{{define "content"}}
+<div x-data="firewallApp()" x-init="load()">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem;">
+        <p style="margin:0; color:var(--pico-muted-color);">
+            Default policy: <strong style="color:var(--danger);">DROP</strong> — only allowed rules pass through.
+        </p>
+        <button @click="showAdd = !showAdd">+ Add Rule</button>
+    </div>
+
+    <!-- Add rule form -->
+    <article x-show="showAdd" x-transition>
+        <header><h5 style="margin:0;">New Firewall Rule</h5></header>
+        <div class="grid">
+            <label>
+                Description
+                <input type="text" x-model="form.description" placeholder="e.g. Allow HTTPS">
+            </label>
+            <label>
+                Direction
+                <select x-model="form.direction">
+                    <option value="forward">Forward (client traffic)</option>
+                    <option value="outbound">Outbound (RPi itself)</option>
+                </select>
+            </label>
+        </div>
+        <div class="grid">
+            <label>
+                Protocol
+                <select x-model="form.protocol">
+                    <option value="tcp">TCP</option>
+                    <option value="udp">UDP</option>
+                    <option value="icmp">ICMP</option>
+                    <option value="all">All</option>
+                </select>
+            </label>
+            <label>
+                Dest Port
+                <input type="text" x-model="form.dest_port" placeholder="e.g. 443 or 80,443">
+            </label>
+            <label>
+                Action
+                <select x-model="form.action">
+                    <option value="accept">Accept</option>
+                    <option value="drop">Drop</option>
+                    <option value="reject">Reject</option>
+                </select>
+            </label>
+        </div>
+        <div class="grid">
+            <label>
+                Dest IP (optional)
+                <input type="text" x-model="form.dest_ip" placeholder="e.g. 0.0.0.0/0 or specific IP">
+            </label>
+            <label>
+                Device MAC (optional, empty = all devices)
+                <input type="text" x-model="form.device_mac" placeholder="e.g. AA:BB:CC:DD:EE:FF">
+            </label>
+            <label>
+                Priority
+                <input type="number" x-model.number="form.priority" value="100">
+            </label>
+        </div>
+        <footer>
+            <button class="outline secondary" @click="showAdd = false">Cancel</button>
+            <button @click="addRule()">Save Rule</button>
+        </footer>
+    </article>
+
+    <!-- Rules table -->
+    <table>
+        <thead>
+            <tr>
+                <th>Enabled</th>
+                <th>Description</th>
+                <th>Direction</th>
+                <th>Protocol</th>
+                <th>Dest Port</th>
+                <th>Dest IP</th>
+                <th>Action</th>
+                <th>Device</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            <template x-for="r in rules" :key="r.id">
+                <tr>
+                    <td>
+                        <label class="toggle" @click.prevent="toggleRule(r)">
+                            <input type="checkbox" :checked="r.enabled">
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </td>
+                    <td x-text="r.description || '-'"></td>
+                    <td><span class="badge badge-info" x-text="r.direction"></span></td>
+                    <td x-text="r.protocol"></td>
+                    <td><code x-text="r.dest_port || '*'"></code></td>
+                    <td><code x-text="r.dest_ip || '*'"></code></td>
+                    <td>
+                        <span class="badge" :class="r.action === 'accept' ? 'badge-success' : 'badge-danger'" x-text="r.action"></span>
+                    </td>
+                    <td><code x-text="r.device_mac || 'all'" style="font-size:0.8rem;"></code></td>
+                    <td>
+                        <button class="outline btn-sm" style="color:var(--danger);" @click="deleteRule(r.id)">Delete</button>
+                    </td>
+                </tr>
+            </template>
+        </tbody>
+    </table>
+    <p x-show="rules.length === 0" style="text-align:center; color:var(--pico-muted-color);">
+        No rules yet. All client internet traffic is blocked by default. Add accept rules to allow specific traffic.
+    </p>
+</div>
+{{end}}
+
+{{define "scripts"}}
+<script>
+function firewallApp() {
+    return {
+        rules: [],
+        showAdd: false,
+        form: { description: '', direction: 'forward', protocol: 'tcp', dest_port: '', dest_ip: '', action: 'accept', device_mac: '', enabled: true, priority: 100 },
+        async load() {
+            this.rules = await api.get('/api/firewall/rules');
+        },
+        async addRule() {
+            await api.post('/api/firewall/rules', this.form);
+            notify('Rule added', 'success');
+            this.showAdd = false;
+            this.form = { description: '', direction: 'forward', protocol: 'tcp', dest_port: '', dest_ip: '', action: 'accept', device_mac: '', enabled: true, priority: 100 };
+            this.load();
+        },
+        async toggleRule(r) {
+            // Optimistic update
+            r.enabled = !r.enabled;
+            try {
+                await api.put('/api/firewall/rules/' + r.id, {
+                    description: r.description,
+                    direction: r.direction,
+                    protocol: r.protocol,
+                    source_ip: r.source_ip,
+                    dest_ip: r.dest_ip,
+                    dest_port: r.dest_port,
+                    action: r.action,
+                    device_mac: r.device_mac,
+                    enabled: r.enabled,
+                    priority: r.priority
+                });
+                notify(r.enabled ? 'Rule enabled' : 'Rule disabled', 'success');
+            } catch(e) {
+                r.enabled = !r.enabled; // rollback on error
+            }
+        },
+        async deleteRule(id) {
+            if (!confirm('Delete this rule?')) return;
+            await api.delete('/api/firewall/rules/' + id);
+            notify('Rule deleted', 'success');
+            this.load();
+        }
+    };
+}
+</script>
+{{end}}

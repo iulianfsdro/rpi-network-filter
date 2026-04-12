@@ -1,0 +1,269 @@
+{{define "title"}}Statistics{{end}}
+
+{{define "content"}}
+<div x-data="statsApp()" x-init="load()">
+    <!-- Range selector -->
+    <div style="display:flex; gap:0.5rem; margin-bottom:1.2rem; flex-wrap:wrap;">
+        <template x-for="r in ranges" :key="r.value">
+            <button type="button"
+                class="range-btn"
+                :class="range === r.value ? 'active' : 'outline'"
+                @click="range = r.value; load()"
+                x-text="r.label"></button>
+        </template>
+        <div style="flex:1"></div>
+        <button type="button" class="outline" @click="load()">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+            Refresh
+        </button>
+    </div>
+
+    <!-- Summary cards -->
+    <div class="stats-grid">
+        <div class="stat-card">
+            <div class="stat-label">Total</div>
+            <div class="stat-value" x-text="summary.total || 0"></div>
+            <div class="stat-sub">all entries</div>
+        </div>
+        <div class="stat-card" style="border-color:var(--accent);">
+            <div class="stat-label">DNS Queries</div>
+            <div class="stat-value" x-text="summary.queries || 0" style="color:var(--accent);"></div>
+            <div class="stat-sub">client DNS lookups</div>
+        </div>
+        <div class="stat-card" style="border-color:var(--success);">
+            <div class="stat-label">Allowed</div>
+            <div class="stat-value" x-text="summary.allowed || 0" style="color:var(--success);"></div>
+            <div class="stat-sub">via firewall rules</div>
+        </div>
+        <div class="stat-card" style="border-color:var(--danger);">
+            <div class="stat-label">Blocked</div>
+            <div class="stat-value" x-text="summary.blocked || 0" style="color:var(--danger);"></div>
+            <div class="stat-sub">default deny</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">Domains</div>
+            <div class="stat-value" x-text="summary.unique_domains || 0"></div>
+            <div class="stat-sub">unique seen</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">Clients</div>
+            <div class="stat-value" x-text="summary.unique_clients || 0"></div>
+            <div class="stat-sub">unique IPs</div>
+        </div>
+    </div>
+
+    <!-- Timeseries chart -->
+    <article>
+        <header><h5 style="margin:0;">Activity Over Time</h5></header>
+        <div style="position:relative; height:260px;">
+            <canvas id="ts-chart"></canvas>
+        </div>
+    </article>
+
+    <!-- Top lists -->
+    <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(320px, 1fr)); gap:1rem;">
+        <!-- Top blocked -->
+        <article>
+            <header><h5 style="margin:0;">Top Blocked</h5></header>
+            <table>
+                <thead><tr><th>Destination</th><th style="width:70px; text-align:right;">Count</th><th style="width:80px;"></th></tr></thead>
+                <tbody>
+                    <template x-for="d in topBlocked" :key="d.domain">
+                        <tr>
+                            <td style="font-size:0.85rem; word-break:break-all;" x-text="d.domain"></td>
+                            <td style="text-align:right; color:var(--danger); font-weight:600;" x-text="d.count"></td>
+                            <td><button type="button" class="btn-sm outline" @click="quickAllow(d.domain)">Allow</button></td>
+                        </tr>
+                    </template>
+                </tbody>
+            </table>
+            <p x-show="topBlocked.length === 0" style="color:var(--text-muted); text-align:center; margin:1rem 0;">No blocked traffic yet</p>
+        </article>
+
+        <!-- Top queries -->
+        <article>
+            <header><h5 style="margin:0;">Top DNS Queries</h5></header>
+            <table>
+                <thead><tr><th>Domain</th><th style="width:70px; text-align:right;">Count</th><th style="width:80px;"></th></tr></thead>
+                <tbody>
+                    <template x-for="d in topQueries" :key="d.domain">
+                        <tr>
+                            <td style="font-size:0.85rem; word-break:break-all;" x-text="d.domain"></td>
+                            <td style="text-align:right; color:var(--accent); font-weight:600;" x-text="d.count"></td>
+                            <td><button type="button" class="btn-sm outline" style="color:var(--danger);" @click="quickBlock(d.domain)">Block</button></td>
+                        </tr>
+                    </template>
+                </tbody>
+            </table>
+            <p x-show="topQueries.length === 0" style="color:var(--text-muted); text-align:center; margin:1rem 0;">No queries yet</p>
+        </article>
+
+        <!-- Top allowed -->
+        <article>
+            <header><h5 style="margin:0;">Top Allowed</h5></header>
+            <table>
+                <thead><tr><th>Destination</th><th style="width:70px; text-align:right;">Count</th></tr></thead>
+                <tbody>
+                    <template x-for="d in topAllowed" :key="d.domain">
+                        <tr>
+                            <td style="font-size:0.85rem; word-break:break-all;" x-text="d.domain"></td>
+                            <td style="text-align:right; color:var(--success); font-weight:600;" x-text="d.count"></td>
+                        </tr>
+                    </template>
+                </tbody>
+            </table>
+            <p x-show="topAllowed.length === 0" style="color:var(--text-muted); text-align:center; margin:1rem 0;">No allowed traffic yet</p>
+        </article>
+
+        <!-- Top clients -->
+        <article>
+            <header><h5 style="margin:0;">Top Clients</h5></header>
+            <table>
+                <thead><tr><th>Client IP</th><th style="width:70px; text-align:right;">Count</th></tr></thead>
+                <tbody>
+                    <template x-for="c in topClients" :key="c.client">
+                        <tr>
+                            <td><code x-text="c.client"></code></td>
+                            <td style="text-align:right; font-weight:600;" x-text="c.count"></td>
+                        </tr>
+                    </template>
+                </tbody>
+            </table>
+            <p x-show="topClients.length === 0" style="color:var(--text-muted); text-align:center; margin:1rem 0;">No clients yet</p>
+        </article>
+    </div>
+</div>
+{{end}}
+
+{{define "scripts"}}
+<script src="/static/js/chart.min.js"></script>
+<script>
+function statsApp() {
+    return {
+        range: '24h',
+        ranges: [
+            { value: '1h',  label: '1H' },
+            { value: '24h', label: '24H' },
+            { value: '7d',  label: '7D' },
+            { value: '30d', label: '30D' },
+            { value: 'all', label: 'All' },
+        ],
+        summary: {},
+        topBlocked: [],
+        topAllowed: [],
+        topQueries: [],
+        topClients: [],
+        chart: null,
+
+        async load() {
+            const r = '?range=' + this.range;
+            const [summary, blocked, allowed, queries, clients, ts] = await Promise.all([
+                api.get('/api/system/stats/summary' + r),
+                api.get('/api/system/stats/top-domains?action=blocked&range=' + this.range),
+                api.get('/api/system/stats/top-domains?action=allowed&range=' + this.range),
+                api.get('/api/system/stats/top-domains?action=query&range=' + this.range),
+                api.get('/api/system/stats/top-clients' + r),
+                api.get('/api/system/stats/timeseries' + r),
+            ]);
+            this.summary = summary;
+            this.topBlocked = blocked || [];
+            this.topAllowed = allowed || [];
+            this.topQueries = queries || [];
+            this.topClients = clients || [];
+            this.renderChart(ts || []);
+        },
+
+        renderChart(points) {
+            const ctx = document.getElementById('ts-chart');
+            if (!ctx) return;
+
+            const labels = points.map(p => p.time);
+            const queries = points.map(p => p.queries);
+            const allowed = points.map(p => p.allowed);
+            const blocked = points.map(p => p.blocked);
+
+            if (this.chart) {
+                this.chart.data.labels = labels;
+                this.chart.data.datasets[0].data = queries;
+                this.chart.data.datasets[1].data = allowed;
+                this.chart.data.datasets[2].data = blocked;
+                this.chart.update();
+                return;
+            }
+
+            this.chart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels,
+                    datasets: [
+                        {
+                            label: 'DNS Queries',
+                            data: queries,
+                            borderColor: '#6366f1',
+                            backgroundColor: 'rgba(99,102,241,0.15)',
+                            tension: 0.3,
+                            fill: true,
+                        },
+                        {
+                            label: 'Allowed',
+                            data: allowed,
+                            borderColor: '#10b981',
+                            backgroundColor: 'rgba(16,185,129,0.15)',
+                            tension: 0.3,
+                            fill: true,
+                        },
+                        {
+                            label: 'Blocked',
+                            data: blocked,
+                            borderColor: '#ef4444',
+                            backgroundColor: 'rgba(239,68,68,0.15)',
+                            tension: 0.3,
+                            fill: true,
+                        },
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    interaction: { intersect: false, mode: 'index' },
+                    plugins: {
+                        legend: { labels: { color: '#9ca3af' } },
+                    },
+                    scales: {
+                        x: {
+                            ticks: { color: '#9ca3af', maxRotation: 0, autoSkip: true, maxTicksLimit: 10 },
+                            grid: { color: '#374151' },
+                        },
+                        y: {
+                            beginAtZero: true,
+                            ticks: { color: '#9ca3af' },
+                            grid: { color: '#374151' },
+                        }
+                    }
+                }
+            });
+        },
+
+        async quickAllow(domain) {
+            await api.post('/api/firewall/rules', {
+                description: 'Allow ' + domain,
+                direction: 'forward',
+                protocol: 'all',
+                dest_port: '',
+                dest_ip: domain,
+                action: 'accept',
+                device_mac: '',
+                enabled: true,
+                priority: 100
+            });
+            notify('Allow rule added for ' + domain, 'success');
+        },
+
+        async quickBlock(domain) {
+            await api.post('/api/dns/blocklist', { domain, category: 'manual' });
+            notify('Blocked: ' + domain, 'success');
+        }
+    };
+}
+</script>
+{{end}}

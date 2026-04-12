@@ -1,0 +1,135 @@
+{{define "title"}}Settings{{end}}
+
+{{define "content"}}
+<div x-data="settingsApp()" x-init="load()">
+    <!-- Hotspot Settings -->
+    <article>
+        <header><h5 style="margin:0;">Hotspot Configuration</h5></header>
+        <div class="grid">
+            <label>
+                SSID (Network Name)
+                <input type="text" x-model="settings.ap_ssid">
+            </label>
+            <label>
+                Password
+                <input type="password" x-model="settings.ap_password">
+            </label>
+            <label>
+                Channel
+                <select x-model="settings.ap_channel">
+                    <option value="1">1</option>
+                    <option value="6">6</option>
+                    <option value="11">11</option>
+                </select>
+            </label>
+        </div>
+        <button @click="saveHotspot()" :aria-busy="saving">Save Hotspot Settings</button>
+        <small style="color:var(--pico-muted-color); display:block; margin-top:0.5rem;">
+            Saving will restart the hotspot. Connected devices will need to reconnect.
+        </small>
+    </article>
+
+    <!-- DNS Settings -->
+    <article>
+        <header><h5 style="margin:0;">DNS Configuration</h5></header>
+        <label>
+            Upstream DNS Servers (comma-separated)
+            <input type="text" x-model="settings.dns_upstream" placeholder="1.1.1.1,8.8.8.8">
+        </label>
+        <button @click="saveDNS()">Save DNS Settings</button>
+    </article>
+
+    <!-- Admin Password -->
+    <article>
+        <header><h5 style="margin:0;">Admin Password</h5></header>
+        <label>
+            New Password (min 8 characters)
+            <input type="password" x-model="newPassword" placeholder="Enter new password">
+        </label>
+        <label>
+            Confirm Password
+            <input type="password" x-model="confirmPassword" placeholder="Confirm new password">
+        </label>
+        <button @click="changePassword()">Change Password</button>
+    </article>
+
+    <!-- System Actions -->
+    <article>
+        <header><h5 style="margin:0;">System</h5></header>
+        <div class="btn-group">
+            <button class="outline" style="color:var(--danger);" @click="reboot()">Reboot RPi</button>
+        </div>
+
+        <!-- Audit Log -->
+        <details style="margin-top:1rem;">
+            <summary>Recent Activity Log</summary>
+            <table>
+                <thead><tr><th>Time</th><th>Action</th><th>Details</th></tr></thead>
+                <tbody>
+                    <template x-for="log in auditLogs" :key="log.id">
+                        <tr>
+                            <td style="font-size:0.8rem;" x-text="new Date(log.timestamp).toLocaleString()"></td>
+                            <td><code x-text="log.action" style="font-size:0.8rem;"></code></td>
+                            <td style="font-size:0.85rem;" x-text="log.details"></td>
+                        </tr>
+                    </template>
+                </tbody>
+            </table>
+        </details>
+    </article>
+</div>
+{{end}}
+
+{{define "scripts"}}
+<script>
+function settingsApp() {
+    return {
+        settings: {},
+        newPassword: '',
+        confirmPassword: '',
+        saving: false,
+        auditLogs: [],
+        async load() {
+            this.settings = await api.get('/api/settings');
+            this.auditLogs = await api.get('/api/system/audit');
+        },
+        async saveHotspot() {
+            this.saving = true;
+            try {
+                await api.put('/api/settings', {
+                    ap_ssid: this.settings.ap_ssid,
+                    ap_password: this.settings.ap_password,
+                    ap_channel: this.settings.ap_channel
+                });
+                notify('Hotspot settings saved — restarting AP', 'success');
+            } finally {
+                this.saving = false;
+            }
+        },
+        async saveDNS() {
+            await api.put('/api/settings', { dns_upstream: this.settings.dns_upstream });
+            notify('DNS settings saved', 'success');
+        },
+        async changePassword() {
+            if (this.newPassword.length < 8) {
+                notify('Password must be at least 8 characters', 'error');
+                return;
+            }
+            if (this.newPassword !== this.confirmPassword) {
+                notify('Passwords do not match', 'error');
+                return;
+            }
+            await api.put('/api/settings/password', { password: this.newPassword });
+            notify('Password changed', 'success');
+            this.newPassword = '';
+            this.confirmPassword = '';
+        },
+        async reboot() {
+            if (!confirm('Reboot the Raspberry Pi? All connections will be dropped.')) return;
+            await api.post('/api/system/reboot');
+            notify('Rebooting...', 'info');
+        }
+    };
+}
+</script>
+{{end}}

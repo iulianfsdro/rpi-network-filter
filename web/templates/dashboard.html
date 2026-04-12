@@ -1,0 +1,107 @@
+{{define "title"}}Dashboard{{end}}
+
+{{define "content"}}
+<div x-data="dashboardApp()" x-init="load()">
+    <div class="stats-grid">
+        <div class="stat-card">
+            <div class="stat-label">Devices Online</div>
+            <div class="stat-value" x-text="data.devices_online || 0"></div>
+            <div class="stat-sub" x-text="(data.devices_total || 0) + ' total registered'"></div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">Firewall Rules</div>
+            <div class="stat-value" x-text="data.firewall_rules || 0"></div>
+            <div class="stat-sub">active rules (default: deny all)</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">DNS Blocked</div>
+            <div class="stat-value" x-text="data.dns_blocked || 0"></div>
+            <div class="stat-sub">domains in blocklist</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">Uptime</div>
+            <div class="stat-value" x-text="data.system ? formatUptime(parseFloat(data.system.uptime)) : '-'"></div>
+            <div class="stat-sub" x-text="data.system ? data.system.load_avg : ''"></div>
+        </div>
+    </div>
+
+    <div class="stats-grid">
+        <div class="stat-card">
+            <div class="stat-label">WAN Interface</div>
+            <div class="stat-value" style="font-size:1.1rem" x-text="data.system ? data.system.wan_interface : '-'"></div>
+            <div class="stat-sub" x-text="data.system ? 'IP: ' + (data.system.wan_ip || 'N/A') : ''"></div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">WAN Traffic</div>
+            <div class="stat-value" style="font-size:1.1rem">
+                <span x-text="data.system ? formatBytes(data.system.wan_rx_bytes) + ' rx' : '-'"></span>
+            </div>
+            <div class="stat-sub" x-text="data.system ? formatBytes(data.system.wan_tx_bytes) + ' tx' : ''"></div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">Memory</div>
+            <div class="stat-value" style="font-size:1.1rem" x-text="data.system ? data.system.mem_total : '-'"></div>
+            <div class="stat-sub" x-text="data.system ? 'Free: ' + data.system.mem_free : ''"></div>
+        </div>
+    </div>
+
+    <!-- Connectivity Test -->
+    <article>
+        <header>
+            <div style="display:flex; justify-content:space-between; align-items:center;">
+                <h5 style="margin:0;">Internet Connectivity Test</h5>
+                <button class="btn-sm outline" @click="testConnectivity()" :aria-busy="testing">
+                    <span x-show="!testing">Run Test</span>
+                    <span x-show="testing">Testing...</span>
+                </button>
+            </div>
+        </header>
+        <div x-show="connectivity.length > 0">
+            <table>
+                <thead><tr><th>Host</th><th>Status</th><th>Latency</th></tr></thead>
+                <tbody>
+                    <template x-for="c in connectivity" :key="c.host">
+                        <tr>
+                            <td x-text="c.host"></td>
+                            <td>
+                                <span x-show="c.success" class="badge badge-success">OK</span>
+                                <span x-show="!c.success" class="badge badge-danger">FAIL</span>
+                            </td>
+                            <td x-text="c.success ? (c.latency || '-') : (c.error || 'unreachable')"></td>
+                        </tr>
+                    </template>
+                </tbody>
+            </table>
+        </div>
+        <p x-show="connectivity.length === 0" style="color: var(--pico-muted-color);">
+            Click "Run Test" to check if the RPi can reach the internet via the LTE dongle.
+        </p>
+    </article>
+</div>
+{{end}}
+
+{{define "scripts"}}
+<script>
+function dashboardApp() {
+    return {
+        data: {},
+        connectivity: [],
+        testing: false,
+        async load() {
+            this.data = await api.get('/api/dashboard');
+            setInterval(() => this.refresh(), 10000);
+        },
+        async refresh() {
+            this.data = await api.get('/api/dashboard');
+        },
+        async testConnectivity() {
+            this.testing = true;
+            try {
+                this.connectivity = await api.get('/api/system/connectivity');
+            } catch(e) {}
+            this.testing = false;
+        }
+    };
+}
+</script>
+{{end}}

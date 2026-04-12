@@ -1,0 +1,157 @@
+{{define "title"}}Allow List{{end}}
+
+{{define "content"}}
+<div x-data="allowListApp()" x-init="load()">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem; flex-wrap:wrap; gap:0.5rem;">
+        <p style="margin:0; color:var(--text-muted); max-width:640px;">
+            Allow specific domains (and their subdomains) to reach the internet. When a connected
+            device resolves one of these domains, its IP is auto-added to the nftables allow set.
+            <strong>Exact-match control</strong>: adding <code>mail.google.com</code> will NOT allow
+            <code>drive.google.com</code>.
+        </p>
+        <button type="button" @click="showAdd = !showAdd">+ Add Domain</button>
+    </div>
+
+    <!-- Add form -->
+    <article x-show="showAdd" x-transition>
+        <header><h5 style="margin:0;">Allow Domain</h5></header>
+        <div class="grid">
+            <label>
+                Domain
+                <input type="text" x-model="form.domain" placeholder="e.g. mail.google.com" @keyup.enter="addDomain()">
+                <small>Will match this domain and all deeper subdomains. Not siblings.</small>
+            </label>
+            <label>
+                Description (optional)
+                <input type="text" x-model="form.description" placeholder="e.g. Gmail web access">
+            </label>
+        </div>
+        <div style="display:flex; gap:0.5rem; justify-content:flex-end; margin-top:0.5rem;">
+            <button type="button" class="outline" @click="showAdd = false">Cancel</button>
+            <button type="button" @click="addDomain()">Add</button>
+        </div>
+    </article>
+
+    <!-- Stats -->
+    <div class="stats-grid" style="margin-bottom:1rem;">
+        <div class="stat-card">
+            <div class="stat-label">Allowed Domains</div>
+            <div class="stat-value" x-text="domains.filter(d => d.enabled).length"></div>
+            <div class="stat-sub" x-text="domains.length + ' total'"></div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">Active IPs in Set</div>
+            <div class="stat-value" x-text="activeIPs.length"></div>
+            <div class="stat-sub">auto-populated by DNS</div>
+        </div>
+    </div>
+
+    <!-- List -->
+    <table>
+        <thead>
+            <tr>
+                <th style="width:60px;">Enabled</th>
+                <th>Domain</th>
+                <th>Description</th>
+                <th style="width:140px;">Added</th>
+                <th style="width:100px;">Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            <template x-for="d in domains" :key="d.id">
+                <tr>
+                    <td>
+                        <label class="toggle" @click.prevent="toggleDomain(d)">
+                            <input type="checkbox" :checked="d.enabled">
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </td>
+                    <td><code style="font-size:0.9rem;" x-text="d.domain"></code></td>
+                    <td style="color:var(--text-muted); font-size:0.85rem;" x-text="d.description || '—'"></td>
+                    <td style="font-size:0.8rem; color:var(--text-muted);" x-text="new Date(d.created_at).toLocaleString()"></td>
+                    <td>
+                        <button type="button" class="outline btn-sm" style="color:var(--danger);" @click="deleteDomain(d)">Remove</button>
+                    </td>
+                </tr>
+            </template>
+        </tbody>
+    </table>
+
+    <p x-show="domains.length === 0" style="text-align:center; color:var(--text-muted); padding:2rem;">
+        No allow-listed domains. Add one above to permit client traffic to that domain.
+    </p>
+
+    <!-- Active IPs in set -->
+    <article x-show="activeIPs.length > 0" style="margin-top:1.5rem;">
+        <header>
+            <div style="display:flex; justify-content:space-between; align-items:center;">
+                <h5 style="margin:0;">Active IPs in nftables Set</h5>
+                <button type="button" class="outline btn-sm" @click="loadIPs()">Refresh</button>
+            </div>
+        </header>
+        <small style="color:var(--text-muted);">These are the IPs currently allowed through the firewall. Entries expire after 1 hour of inactivity.</small>
+        <div style="margin-top:0.75rem; display:flex; flex-wrap:wrap; gap:0.4rem;">
+            <template x-for="ip in activeIPs" :key="ip">
+                <code style="background:var(--surface-3); padding:0.25rem 0.5rem; border-radius:4px; font-size:0.8rem;" x-text="ip"></code>
+            </template>
+        </div>
+    </article>
+</div>
+{{end}}
+
+{{define "scripts"}}
+<script>
+function allowListApp() {
+    return {
+        domains: [],
+        activeIPs: [],
+        showAdd: false,
+        form: { domain: '', description: '', enabled: true },
+
+        async load() {
+            this.domains = await api.get('/api/firewall/allowed-domains');
+            await this.loadIPs();
+        },
+        async loadIPs() {
+            try {
+                this.activeIPs = await api.get('/api/firewall/allowed-domains/ips');
+            } catch(e) {
+                this.activeIPs = [];
+            }
+        },
+        async addDomain() {
+            if (!this.form.domain) {
+                notify('Domain is required', 'error');
+                return;
+            }
+            try {
+                await api.post('/api/firewall/allowed-domains', this.form);
+                notify('Domain added to allow list', 'success');
+                this.showAdd = false;
+                this.form = { domain: '', description: '', enabled: true };
+                this.load();
+            } catch(e) {}
+        },
+        async toggleDomain(d) {
+            d.enabled = !d.enabled;
+            try {
+                await api.put('/api/firewall/allowed-domains/' + d.id, {
+                    domain: d.domain,
+                    description: d.description,
+                    enabled: d.enabled
+                });
+                notify(d.enabled ? 'Enabled' : 'Disabled', 'success');
+            } catch(e) {
+                d.enabled = !d.enabled;
+            }
+        },
+        async deleteDomain(d) {
+            if (!confirm('Remove ' + d.domain + ' from allow list? Traffic to this domain will be blocked again.')) return;
+            await api.delete('/api/firewall/allowed-domains/' + d.id);
+            notify('Removed', 'success');
+            this.load();
+        }
+    };
+}
+</script>
+{{end}}

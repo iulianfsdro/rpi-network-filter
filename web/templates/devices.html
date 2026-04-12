@@ -1,0 +1,112 @@
+{{define "title"}}Devices{{end}}
+
+{{define "content"}}
+<div x-data="devicesApp()" x-init="load()">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem;">
+        <p style="margin:0; color:var(--pico-muted-color);">
+            <span x-text="devices.filter(d => d.online).length"></span> online /
+            <span x-text="devices.length"></span> total
+        </p>
+        <button class="outline btn-sm" @click="load()">Refresh</button>
+    </div>
+
+    <table>
+        <thead>
+            <tr>
+                <th>Status</th>
+                <th>Name</th>
+                <th>MAC Address</th>
+                <th>IP Address</th>
+                <th>Blocked</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            <template x-for="d in devices" :key="d.mac_address">
+                <tr>
+                    <td>
+                        <span x-show="d.online" class="badge badge-success">Online</span>
+                        <span x-show="!d.online" class="badge badge-muted">Offline</span>
+                    </td>
+                    <td>
+                        <strong x-text="d.alias || d.hostname || 'Unknown'"></strong>
+                        <br x-show="d.alias && d.hostname">
+                        <small x-show="d.alias && d.hostname" x-text="d.hostname" style="color:var(--pico-muted-color);"></small>
+                    </td>
+                    <td><code x-text="d.mac_address" style="font-size:0.85rem;"></code></td>
+                    <td x-text="d.ip_address || '-'"></td>
+                    <td>
+                        <label class="toggle" @click.prevent="toggleBlock(d)">
+                            <input type="checkbox" :checked="d.is_blocked">
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </td>
+                    <td>
+                        <button class="outline btn-sm" @click="editDevice(d)">Edit</button>
+                    </td>
+                </tr>
+            </template>
+        </tbody>
+    </table>
+
+    <dialog id="edit-dialog">
+        <article>
+            <header><h5 style="margin:0;">Edit Device</h5></header>
+            <label>
+                Alias
+                <input type="text" x-model="editForm.alias" placeholder="e.g. My Phone">
+            </label>
+            <label>
+                <input type="checkbox" x-model="editForm.is_blocked">
+                Block all traffic
+            </label>
+            <footer style="display:flex; gap:0.5rem; justify-content:flex-end;">
+                <button class="outline secondary" @click="closeEdit()">Cancel</button>
+                <button @click="saveDevice()">Save</button>
+            </footer>
+        </article>
+    </dialog>
+</div>
+{{end}}
+
+{{define "scripts"}}
+<script>
+function devicesApp() {
+    return {
+        devices: [],
+        editForm: { mac: '', alias: '', is_blocked: false },
+        async load() {
+            this.devices = await api.get('/api/devices');
+        },
+        async toggleBlock(d) {
+            d.is_blocked = !d.is_blocked;
+            try {
+                await api.put('/api/devices/' + encodeURIComponent(d.mac_address), {
+                    alias: d.alias,
+                    is_blocked: d.is_blocked
+                });
+                notify(d.is_blocked ? 'Device blocked' : 'Device unblocked', 'success');
+            } catch(e) {
+                d.is_blocked = !d.is_blocked;
+            }
+        },
+        editDevice(d) {
+            this.editForm = { mac: d.mac_address, alias: d.alias, is_blocked: d.is_blocked };
+            document.getElementById('edit-dialog').showModal();
+        },
+        closeEdit() {
+            document.getElementById('edit-dialog').close();
+        },
+        async saveDevice() {
+            await api.put('/api/devices/' + encodeURIComponent(this.editForm.mac), {
+                alias: this.editForm.alias,
+                is_blocked: this.editForm.is_blocked
+            });
+            notify('Device updated', 'success');
+            this.closeEdit();
+            this.load();
+        }
+    };
+}
+</script>
+{{end}}

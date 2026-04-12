@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NetFilter - Login</title>
+    <link rel="stylesheet" href="/static/css/pico.min.css">
+    <link rel="stylesheet" href="/static/css/app.css">
+</head>
+<body>
+    <main class="container" x-data="loginApp()" style="max-width: 420px; margin-top: 10vh;">
+        <article>
+            <header>
+                <h2 style="margin-bottom: 0;">NetFilter</h2>
+                <small>Router Management</small>
+            </header>
+
+            <form @submit.prevent="login()">
+                <label>
+                    Username
+                    <input type="text" x-model="username" placeholder="admin" required autofocus>
+                </label>
+                <label>
+                    Password
+                    <input type="password" x-model="password" placeholder="Password" required>
+                </label>
+                <button type="submit" :aria-busy="loading" :disabled="loading">
+                    <span x-show="!loading">Sign In</span>
+                    <span x-show="loading">Signing in...</span>
+                </button>
+            </form>
+
+            <p x-show="error" x-text="error" style="color: var(--pico-color-red-500); text-align: center;"></p>
+        </article>
+    </main>
+
+    <script src="/static/js/alpine.min.js" defer></script>
+    <script src="/static/js/app.js"></script>
+    <script>
+    function loginApp() {
+        return {
+            username: '',
+            password: '',
+            loading: false,
+            error: '',
+            async login() {
+                this.loading = true;
+                this.error = '';
+                try {
+                    await api.post('/api/login', {
+                        username: this.username,
+                        password: this.password
+                    });
+                    window.location = '/';
+                } catch (e) {
+                    this.error = 'Invalid credentials';
+                } finally {
+                    this.loading = false;
+                }
+            }
+        };
+    }
+    </script>
+</body>
+</html>

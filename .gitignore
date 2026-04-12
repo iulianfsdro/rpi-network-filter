@@ -1,0 +1,8 @@
+netfilterd
+netfilterd-arm64
+netfilterd.exe
+*.db
+*.db-wal
+*.db-shm
+*.crt
+*.key

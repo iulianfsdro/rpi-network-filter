@@ -1,0 +1,241 @@
+{{define "title"}}Traffic Monitor{{end}}
+
+{{define "content"}}
+<div x-data="trafficApp()" x-init="load()">
+    <!-- Top controls -->
+    <div style="display:flex; gap:0.5rem; align-items:center; flex-wrap:wrap; margin-bottom:1rem;">
+        <span class="badge" :class="live ? 'badge-success' : 'badge-muted'">
+            <span x-show="live">● LIVE</span>
+            <span x-show="!live">⏸ PAUSED</span>
+        </span>
+        <span style="font-size:0.85rem; color:var(--text-muted);">
+            Showing <strong x-text="entries.length"></strong> of
+            <strong x-text="total.toLocaleString()"></strong> total
+        </span>
+        <div style="flex:1"></div>
+        <button type="button" class="outline btn-sm" @click="togglePause()" x-text="live ? 'Pause' : 'Resume'"></button>
+        <button type="button" class="outline btn-sm" @click="load()">Refresh</button>
+        <button type="button" class="outline btn-sm" style="color:var(--danger);" @click="clearLog()">Clear Log</button>
+    </div>
+
+    <!-- Filters -->
+    <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(160px, 1fr)); gap:0.5rem; margin-bottom:1rem;">
+        <label style="margin:0;">
+            Action
+            <select x-model="filter.action" @change="page=1; load()">
+                <option value="">All</option>
+                <option value="query">DNS queries</option>
+                <option value="blocked">Blocked</option>
+                <option value="allowed">Allowed</option>
+            </select>
+        </label>
+        <label style="margin:0;">
+            Search
+            <input type="search" x-model.debounce.500ms="filter.q" @input="page=1; load()" placeholder="IP, domain, port...">
+        </label>
+        <label style="margin:0;">
+            From
+            <input type="datetime-local" x-model="filter.from" @change="page=1; load()">
+        </label>
+        <label style="margin:0;">
+            To
+            <input type="datetime-local" x-model="filter.to" @change="page=1; load()">
+        </label>
+        <label style="margin:0;">
+            Per page
+            <select x-model.number="perPage" @change="page=1; load()">
+                <option value="25">25</option>
+                <option value="50">50</option>
+                <option value="100">100</option>
+                <option value="200">200</option>
+                <option value="500">500</option>
+            </select>
+        </label>
+    </div>
+
+    <!-- Table -->
+    <div style="overflow-x:auto;">
+        <table>
+            <thead>
+                <tr>
+                    <th style="width:155px;">Time</th>
+                    <th>Source IP</th>
+                    <th>Domain / Dest IP</th>
+                    <th style="width:70px;">Port</th>
+                    <th style="width:70px;">Proto</th>
+                    <th style="width:90px;">Action</th>
+                    <th style="width:100px;">Quick</th>
+                </tr>
+            </thead>
+            <tbody>
+                <template x-for="e in entries" :key="e.id">
+                    <tr :class="{
+                        'row-blocked': e.action === 'blocked',
+                        'row-allowed': e.action === 'allowed'
+                    }">
+                        <td style="font-size:0.75rem; white-space:nowrap; color:var(--text-muted);" x-text="fmtTime(e.timestamp)"></td>
+                        <td><code x-text="e.src_ip || '-'" style="font-size:0.82rem;"></code></td>
+                        <td>
+                            <template x-if="e.domain">
+                                <div>
+                                    <span style="font-weight:600;" x-text="e.domain"></span>
+                                    <template x-if="e.dst_ip">
+                                        <small style="color:var(--text-muted); display:block; font-size:0.75rem;" x-text="e.dst_ip"></small>
+                                    </template>
+                                </div>
+                            </template>
+                            <template x-if="!e.domain">
+                                <code x-text="e.dst_ip || '-'" style="font-size:0.82rem;"></code>
+                            </template>
+                        </td>
+                        <td><code x-text="e.dst_port || '-'" style="font-size:0.82rem;"></code></td>
+                        <td style="font-size:0.82rem;" x-text="e.protocol || '-'"></td>
+                        <td>
+                            <span class="badge" :class="{
+                                'badge-danger': e.action === 'blocked',
+                                'badge-success': e.action === 'allowed',
+                                'badge-info': e.action === 'query',
+                                'badge-muted': e.action === 'logged'
+                            }" x-text="e.action"></span>
+                        </td>
+                        <td>
+                            <template x-if="e.action === 'query' && e.domain">
+                                <button type="button" class="outline btn-sm" @click="quickAllow(e.domain)" style="font-size:0.72rem;">Allow</button>
+                            </template>
+                            <template x-if="e.action === 'blocked' && e.domain">
+                                <button type="button" class="outline btn-sm" @click="quickAllow(e.domain)" style="font-size:0.72rem;">Allow</button>
+                            </template>
+                        </td>
+                    </tr>
+                </template>
+            </tbody>
+        </table>
+    </div>
+
+    <p x-show="entries.length === 0 && !loading" style="text-align:center; color:var(--text-muted); padding:2rem;">
+        <span x-show="total === 0">No traffic logged yet. Connect a device and try to browse.</span>
+        <span x-show="total > 0">No entries match your filters.</span>
+    </p>
+
+    <!-- Pagination -->
+    <div x-show="pages > 1" style="display:flex; justify-content:center; align-items:center; gap:0.5rem; margin-top:1rem; flex-wrap:wrap;">
+        <button type="button" class="outline btn-sm" :disabled="page === 1" @click="page=1; load()">« First</button>
+        <button type="button" class="outline btn-sm" :disabled="page === 1" @click="page--; load()">‹ Prev</button>
+        <span style="font-size:0.85rem; color:var(--text-muted);">
+            Page <strong x-text="page"></strong> of <strong x-text="pages"></strong>
+        </span>
+        <button type="button" class="outline btn-sm" :disabled="page === pages" @click="page++; load()">Next ›</button>
+        <button type="button" class="outline btn-sm" :disabled="page === pages" @click="page=pages; load()">Last »</button>
+    </div>
+</div>
+{{end}}
+
+{{define "scripts"}}
+<script>
+function trafficApp() {
+    return {
+        entries: [],
+        total: 0,
+        page: 1,
+        pages: 1,
+        perPage: 50,
+        loading: false,
+        live: true,
+        refreshTimer: null,
+        filter: {
+            action: '',
+            q: '',
+            from: '',
+            to: '',
+        },
+
+        async load() {
+            this.loading = true;
+            try {
+                const params = new URLSearchParams({
+                    page: this.page,
+                    per_page: this.perPage,
+                });
+                if (this.filter.action) params.set('action', this.filter.action);
+                if (this.filter.q)      params.set('q',      this.filter.q);
+                if (this.filter.from)   params.set('from',   this.filter.from.replace('T', ' '));
+                if (this.filter.to)     params.set('to',     this.filter.to.replace('T', ' '));
+
+                const res = await api.get('/api/system/traffic?' + params.toString());
+                this.entries = res.entries || [];
+                this.total   = res.total || 0;
+                this.page    = res.page || 1;
+                this.pages   = res.pages || 1;
+            } finally {
+                this.loading = false;
+            }
+        },
+
+        togglePause() {
+            this.live = !this.live;
+            if (this.live) {
+                this.startRefresh();
+                this.load();
+            } else {
+                this.stopRefresh();
+            }
+        },
+
+        startRefresh() {
+            if (this.refreshTimer) return;
+            this.refreshTimer = setInterval(() => {
+                // Only auto-refresh when on page 1 with no date filters (live mode)
+                if (this.live && this.page === 1 && !this.filter.from && !this.filter.to) {
+                    this.load();
+                }
+            }, 3000);
+        },
+
+        stopRefresh() {
+            if (this.refreshTimer) {
+                clearInterval(this.refreshTimer);
+                this.refreshTimer = null;
+            }
+        },
+
+        async clearLog() {
+            if (!confirm('Clear ALL traffic log entries? This cannot be undone.')) return;
+            await api.post('/api/system/traffic/clear');
+            notify('Traffic log cleared', 'success');
+            this.page = 1;
+            this.load();
+        },
+
+        async quickAllow(domain) {
+            await api.post('/api/firewall/allowed-domains', {
+                domain: domain,
+                description: 'Added from traffic monitor',
+                enabled: true
+            });
+            notify('Added ' + domain + ' to allow list', 'success');
+        },
+
+        fmtTime(ts) {
+            if (!ts) return '-';
+            // Try to parse various formats
+            const d = new Date(ts);
+            if (isNaN(d)) return ts;
+            return d.toLocaleString(undefined, {
+                month: 'short', day: '2-digit',
+                hour: '2-digit', minute: '2-digit', second: '2-digit'
+            });
+        },
+
+        init() {
+            this.startRefresh();
+        }
+    };
+}
+
+// Auto-start refresh after Alpine initializes
+document.addEventListener('alpine:initialized', () => {
+    const app = document.querySelector('[x-data]')?.__x?.$data;
+    if (app && app.startRefresh) app.startRefresh();
+});
+</script>
+{{end}}
