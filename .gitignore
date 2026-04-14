@@ -6,3 +6,15 @@ netfilterd.exe
 *.db-shm
 *.crt
 *.key
+
+# Local-only scratch files (deploy notes, probes, SSH setup)
+ssh_setup.txt
+deploy_cmd.txt
+deploy_update.txt
+probe.bat
+probe.ps1
+probe_result.txt
+
+# Local tooling and agent settings
+.claude/
+everything-claude-code/
