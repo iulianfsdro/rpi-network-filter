@@ -15,14 +15,15 @@ import (
 )
 
 type FirewallService struct {
-	db   *sql.DB
-	exec *executor.Executor
-	cfg  config.Config
-	mu   sync.Mutex
+	db      *sql.DB
+	exec    *executor.Executor
+	cfg     config.Config
+	blocked *BlockedService
+	mu      sync.Mutex
 }
 
-func NewFirewallService(db *sql.DB, exec *executor.Executor, cfg config.Config) *FirewallService {
-	return &FirewallService{db: db, exec: exec, cfg: cfg}
+func NewFirewallService(db *sql.DB, exec *executor.Executor, cfg config.Config, blocked *BlockedService) *FirewallService {
+	return &FirewallService{db: db, exec: exec, cfg: cfg, blocked: blocked}
 }
 
 func (s *FirewallService) ListRules() ([]models.FirewallRule, error) {
@@ -115,20 +116,47 @@ func (s *FirewallService) ListAllowedDomains() ([]models.AllowedDomain, error) {
 	return domains, nil
 }
 
+// CreateAllowedDomain inserts a new allow-list entry, or if the domain already
+// exists, re-enables it and returns the existing ID. This makes the quick-allow
+// button in the traffic monitor idempotent: clicking Allow on the same domain
+// twice (or across two different log rows for the same domain) no longer
+// returns a UNIQUE constraint error.
 func (s *FirewallService) CreateAllowedDomain(d models.AllowedDomain) (int64, error) {
 	enabled := 0
 	if d.Enabled {
 		enabled = 1
 	}
-	domain := strings.ToLower(strings.TrimSpace(d.Domain))
-	result, err := s.db.Exec(
-		"INSERT INTO allowed_domains (domain, description, enabled) VALUES (?, ?, ?)",
-		domain, d.Description, enabled,
-	)
-	if err != nil {
-		return 0, fmt.Errorf("insert allowed domain: %w", err)
+	domain := NormalizeDomain(d.Domain)
+	if domain == "" {
+		return 0, fmt.Errorf("domain is required")
 	}
-	return result.LastInsertId()
+
+	if s.blocked != nil {
+		match, err := s.blocked.IsBlocked(domain)
+		if err != nil {
+			return 0, fmt.Errorf("check block list: %w", err)
+		}
+		if match != nil {
+			return 0, fmt.Errorf("%w: %q matches rule %q (%s)",
+				ErrDomainBlocked, domain, match.Domain, match.Reason)
+		}
+	}
+
+	// Upsert: if the row exists, keep its ID and re-apply the incoming
+	// description/enabled values. Returns the row's id.
+	var id int64
+	err := s.db.QueryRow(`
+		INSERT INTO allowed_domains (domain, description, enabled)
+		VALUES (?, ?, ?)
+		ON CONFLICT(domain) DO UPDATE SET
+			description = CASE WHEN excluded.description != '' THEN excluded.description ELSE allowed_domains.description END,
+			enabled     = excluded.enabled
+		RETURNING id
+	`, domain, d.Description, enabled).Scan(&id)
+	if err != nil {
+		return 0, fmt.Errorf("upsert allowed domain: %w", err)
+	}
+	return id, nil
 }
 
 func (s *FirewallService) UpdateAllowedDomain(id int64, d models.AllowedDomain) error {

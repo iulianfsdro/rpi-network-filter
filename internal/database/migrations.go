@@ -122,6 +122,30 @@ var migrations = []string{
 		enabled INTEGER DEFAULT 1,
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	);`,
+
+	// v5: explicit block list — domains that can never be allow-listed,
+	// DNS-sinkholed to 0.0.0.0 so they fail to resolve even if the firewall
+	// is bypassed. Seeded with Tesla firmware/diagnostic endpoints to prevent
+	// accidental allow-list inclusion via the traffic monitor.
+	`CREATE TABLE IF NOT EXISTS blocked_domains (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		domain TEXT NOT NULL UNIQUE,
+		match_type TEXT NOT NULL DEFAULT 'suffix' CHECK(match_type IN ('exact','suffix')),
+		reason TEXT DEFAULT '',
+		enabled INTEGER DEFAULT 1,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);
+
+	INSERT OR IGNORE INTO blocked_domains (domain, match_type, reason) VALUES
+		('ota.vn.tesla.services',       'exact',  'Tesla firmware update channel'),
+		('ota.cn.tesla.services',       'exact',  'Tesla firmware update channel (China)'),
+		('firmware.vn.tesla.services',  'suffix', 'Tesla firmware metadata'),
+		('software-update.tesla.com',   'suffix', 'Tesla update orchestration'),
+		('dl.tesla.com',                'exact',  'Tesla firmware blob CDN'),
+		('tesla-cdn.com',               'suffix', 'Tesla asset and firmware CDN'),
+		('tesla-cdn.net',               'suffix', 'Tesla asset and firmware CDN'),
+		('diag.vn.tesla.services',      'exact',  'Tesla remote diagnostics'),
+		('remote-diagnostics.tesla.com','suffix', 'Tesla remote service access');`,
 }
 
 func Migrate(db *sql.DB) error {

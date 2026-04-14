@@ -3,11 +3,12 @@
 {{define "content"}}
 <div x-data="allowListApp()" x-init="load()">
     <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem; flex-wrap:wrap; gap:0.5rem;">
-        <p style="margin:0; color:var(--text-muted); max-width:640px;">
-            Allow specific domains (and their subdomains) to reach the internet. When a connected
-            device resolves one of these domains, its IP is auto-added to the nftables allow set.
-            <strong>Exact-match control</strong>: adding <code>mail.google.com</code> will NOT allow
-            <code>drive.google.com</code>.
+        <p style="margin:0; color:var(--text-muted); max-width:720px;">
+            Allow specific domains to reach the internet. Matching is <strong>suffix-based</strong>:
+            adding <code>tesla.com</code> (or <code>*.tesla.com</code>) permits <code>tesla.com</code>
+            and all subdomains, but adding <code>mail.google.com</code> does NOT permit
+            <code>drive.google.com</code>. Leading <code>*.</code> is optional and automatically stripped.
+            When a client resolves an allowed domain, its IP is auto-added to the nftables allow set.
         </p>
         <button type="button" @click="showAdd = !showAdd">+ Add Domain</button>
     </div>

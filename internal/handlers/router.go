@@ -41,6 +41,7 @@ func NewRouterWithFS(db *sql.DB, svc *services.Services, cfg config.Config, webF
 	devH := NewDevicesHandler(svc, renderer)
 	fwH := NewFirewallHandler(svc, renderer)
 	dnsH := NewDNSHandler(svc, renderer)
+	blockH := NewBlockedHandler(svc, renderer)
 	bwH := NewBandwidthHandler(svc, renderer)
 	settingsH := NewSettingsHandler(db, svc, renderer)
 	sysH := NewSystemHandler(svc)
@@ -64,6 +65,7 @@ func NewRouterWithFS(db *sql.DB, svc *services.Services, cfg config.Config, webF
 		r.Get("/devices", devH.Page)
 		r.Get("/firewall", fwH.Page)
 		r.Get("/allowlist", fwH.AllowListPage)
+		r.Get("/blocklist", blockH.Page)
 		r.Get("/dns", dnsH.Page)
 		r.Get("/bandwidth", bwH.Page)
 		r.Get("/settings", settingsH.Page)
@@ -97,6 +99,13 @@ func NewRouterWithFS(db *sql.DB, svc *services.Services, cfg config.Config, webF
 				r.Put("/{id}", fwH.UpdateAllowedDomain)
 				r.Delete("/{id}", fwH.DeleteAllowedDomain)
 				r.Get("/ips", fwH.AllowedDomainIPs)
+			})
+
+			r.Route("/firewall/blocked-domains", func(r chi.Router) {
+				r.Get("/", blockH.List)
+				r.Post("/", blockH.Create)
+				r.Put("/{id}", blockH.Update)
+				r.Delete("/{id}", blockH.Delete)
 			})
 
 			r.Route("/dns/blocklist", func(r chi.Router) {

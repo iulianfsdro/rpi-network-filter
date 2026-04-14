@@ -14,13 +14,14 @@ import (
 )
 
 type DNSService struct {
-	db   *sql.DB
-	exec *executor.Executor
-	mu   sync.Mutex
+	db      *sql.DB
+	exec    *executor.Executor
+	blocked *BlockedService
+	mu      sync.Mutex
 }
 
-func NewDNSService(db *sql.DB, exec *executor.Executor) *DNSService {
-	return &DNSService{db: db, exec: exec}
+func NewDNSService(db *sql.DB, exec *executor.Executor, blocked *BlockedService) *DNSService {
+	return &DNSService{db: db, exec: exec, blocked: blocked}
 }
 
 func (s *DNSService) ListEntries() ([]models.DNSBlockEntry, error) {
@@ -160,6 +161,29 @@ func (s *DNSService) Apply() error {
 		rows.Scan(&domain)
 		fmt.Fprintf(&b, "address=/%s/0.0.0.0\n", domain)
 		count++
+	}
+
+	// Hard-blocked domains (e.g. Tesla firmware endpoints) — sinkholed to
+	// 0.0.0.0 so they fail to resolve even if the nftables allow-list is
+	// somehow bypassed. dnsmasq's address= directive is suffix-matching,
+	// so "address=/tesla-cdn.com/0.0.0.0" also sinkholes "x.tesla-cdn.com".
+	if s.blocked != nil {
+		b.WriteString("\n# Hard-blocked domains (never resolve)\n")
+		hard, err := s.blocked.EnabledDomains()
+		if err != nil {
+			log.Printf("[WARN] Failed to read blocked domains: %v", err)
+		}
+		for _, d := range hard {
+			domain := NormalizeDomain(d.Domain)
+			if domain == "" {
+				continue
+			}
+			// dnsmasq matches suffix natively; for 'exact' we still emit the
+			// same form because there's no narrower dnsmasq directive — the
+			// exact/suffix distinction is enforced at the allow-list guard.
+			fmt.Fprintf(&b, "address=/%s/0.0.0.0\n", domain)
+			count++
+		}
 	}
 
 	confPath := "/etc/dnsmasq.d/blocklist.conf"

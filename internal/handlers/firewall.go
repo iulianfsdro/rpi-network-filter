@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 
@@ -63,6 +64,10 @@ func (h *FirewallHandler) CreateAllowedDomain(w http.ResponseWriter, r *http.Req
 
 	id, err := h.firewall.CreateAllowedDomain(d)
 	if err != nil {
+		if errors.Is(err, services.ErrDomainBlocked) {
+			JSONError(w, http.StatusConflict, err.Error())
+			return
+		}
 		JSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}

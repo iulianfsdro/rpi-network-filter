@@ -9,29 +9,32 @@ import (
 )
 
 type Services struct {
-	Auth      *AuthService
-	Network   *NetworkService
-	Firewall  *FirewallService
-	DNS       *DNSService
-	Bandwidth *BandwidthService
-	Hotspot   *HotspotService
-	System    *SystemService
-	Audit     *AuditService
+	Auth       *AuthService
+	Network    *NetworkService
+	Firewall   *FirewallService
+	DNS        *DNSService
+	Blocked    *BlockedService
+	Bandwidth  *BandwidthService
+	Hotspot    *HotspotService
+	System     *SystemService
+	Audit      *AuditService
 	TrafficLog *TrafficLogService
 }
 
 func New(db *sql.DB, exec *executor.Executor, cfg config.Config) *Services {
 	audit := NewAuditService(db)
 	trafficLog := NewTrafficLogService(db)
+	blocked := NewBlockedService(db)
 	return &Services{
-		Auth:      NewAuthService(db),
-		Network:   NewNetworkService(db, cfg),
-		Firewall:  NewFirewallService(db, exec, cfg),
-		DNS:       NewDNSService(db, exec),
-		Bandwidth: NewBandwidthService(db, exec, cfg),
-		Hotspot:   NewHotspotService(db, exec),
-		System:    NewSystemService(exec, cfg),
-		Audit:     audit,
+		Auth:       NewAuthService(db),
+		Network:    NewNetworkService(db, cfg),
+		Firewall:   NewFirewallService(db, exec, cfg, blocked),
+		DNS:        NewDNSService(db, exec, blocked),
+		Blocked:    blocked,
+		Bandwidth:  NewBandwidthService(db, exec, cfg),
+		Hotspot:    NewHotspotService(db, exec),
+		System:     NewSystemService(exec, cfg),
+		Audit:      audit,
 		TrafficLog: trafficLog,
 	}
 }

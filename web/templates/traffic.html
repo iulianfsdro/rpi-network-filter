@@ -207,12 +207,15 @@ function trafficApp() {
         },
 
         async quickAllow(domain) {
-            await api.post('/api/firewall/allowed-domains', {
-                domain: domain,
-                description: 'Added from traffic monitor',
-                enabled: true
-            });
-            notify('Added ' + domain + ' to allow list', 'success');
+            try {
+                await api.post('/api/firewall/allowed-domains', {
+                    domain: domain,
+                    description: 'Added from traffic monitor',
+                    enabled: true
+                });
+                notify(domain + ' allowed — new queries will pass. Older log rows stay marked blocked.', 'success');
+                this.load();
+            } catch(e) { /* api.request already showed the error toast */ }
         },
 
         fmtTime(ts) {

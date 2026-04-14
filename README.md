@@ -19,8 +19,9 @@ A Raspberry Pi 4 network filter appliance that acts as a WiFi hotspot with a def
 ## Features
 
 - **Default-deny firewall** — nothing gets through unless you allow it
-- **Domain-based allow-list** — allow by domain name, not just IP. Uses dnsmasq `nftset=` integration for automatic DNS-to-IP resolution
-- **Traffic monitor** — real-time view of DNS queries and blocked/allowed connections with filtering, search, and pagination
+- **Domain-based allow-list** — allow by domain name, not just IP. Uses dnsmasq `nftset=` integration for automatic DNS-to-IP resolution. Matching is suffix-based: `tesla.com` covers all subdomains. `*.tesla.com` syntax is accepted and normalized.
+- **Hard block-list** — domains that can never be allow-listed (e.g. firmware update endpoints). Enforced at two layers: the allow-list create path rejects matching domains with HTTP 409, and dnsmasq sinkholes them to `0.0.0.0` so they fail to resolve at all. Seeded with Tesla OTA/diagnostic endpoints out of the box.
+- **Traffic monitor** — real-time view of DNS queries and blocked/allowed connections with filtering, search, and pagination. Quick-allow button is idempotent (safe to click twice).
 - **Statistics** — time-series charts and top-N lists for blocked, allowed, queries, and clients
 - **Device management** — see connected devices, assign aliases, block individual devices
 - **DNS blocklist** — Pi-hole-style domain blocking with bulk import (hosts file format)
@@ -118,6 +119,54 @@ web/
 - **nftables** — firewall rules
 - **dnsmasq** — DNS/DHCP with nftset integration
 - **hostapd** — WiFi access point
+
+## Block list (hard deny)
+
+The block list is a separate table (`blocked_domains`) from the allow list and from the pi-hole-style `dns_blocklist`. Its purpose is to enforce *"this vendor must never reach my network, even by accident"*.
+
+**Two layers of enforcement**
+
+1. **Allow-list guard** — `POST /api/firewall/allowed-domains` (and the Allow button in the traffic monitor) calls `BlockedService.IsBlocked(domain)` before any insert. If the domain matches a `blocked_domains` entry (exact or suffix), the request returns HTTP 409 with the matched rule and reason, and the UI toasts the error.
+2. **DNS sinkhole** — `DNSService.Apply` writes `address=/<domain>/0.0.0.0` for every enabled block entry to `/etc/dnsmasq.d/blocklist.conf`. dnsmasq's `address=` directive is suffix-matching, so `address=/tesla-cdn.com/0.0.0.0` also sinks `cdn1.tesla-cdn.com`.
+
+**Match types**
+
+- `suffix` (default) — matches the domain and all deeper subdomains. Accept `*.foo.com`, `foo.com`, or any equivalent form; input is normalized.
+- `exact` — matches only the exact string.
+
+**Seeded entries (Tesla firmware + remote service)**
+
+On first boot, the v5 migration seeds the following entries. Remove any you don't want via the Block List UI:
+
+| Domain | Match | Reason |
+|---|---|---|
+| `ota.vn.tesla.services` | exact | Tesla firmware update channel |
+| `ota.cn.tesla.services` | exact | Tesla firmware update channel (China) |
+| `firmware.vn.tesla.services` | suffix | Tesla firmware metadata |
+| `software-update.tesla.com` | suffix | Tesla update orchestration |
+| `dl.tesla.com` | exact | Tesla firmware blob CDN |
+| `tesla-cdn.com` | suffix | Tesla asset and firmware CDN |
+| `tesla-cdn.net` | suffix | Tesla asset and firmware CDN |
+| `diag.vn.tesla.services` | exact | Tesla remote diagnostics |
+| `remote-diagnostics.tesla.com` | suffix | Tesla remote service access |
+
+**Limitations**
+
+- The block list only protects traffic that actually flows through this appliance. If the blocked device has its own cellular modem (e.g. a Tesla with an active SIM), it will reach the blocked endpoints directly and this filter has no effect.
+- TLS certificate pinning means you cannot MITM these connections to inspect content — blocking is all-or-nothing per hostname.
+- Some vendors share infrastructure between firmware updates and normal app functionality. The seeded Tesla list blocks only firmware/diagnostic hostnames, preserving app functionality via `api.mp.tesla.services` and `fleet-api.*.cloud.tesla.com`.
+
+## Schema versions
+
+| Version | Purpose |
+|---|---|
+| v1 | Core tables (users, sessions, devices, firewall_rules, dns_blocklist, bandwidth_limits, settings, audit_log) |
+| v2 | `query_log` table + indexes for persistent traffic history |
+| v3 | `kv_store` for journalctl cursor state |
+| v4 | `allowed_domains` table for dynamic allow-list via dnsmasq nftset integration |
+| v5 | `blocked_domains` table + Tesla firmware endpoint seed data |
+
+Migrations are idempotent and applied on startup. Adding new ones: append a SQL string to `migrations` in `internal/database/migrations.go` — the version is the slice index + 1.
 
 ## Configuration
 
