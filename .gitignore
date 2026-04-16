@@ -1,6 +1,6 @@
-netfilterd
-netfilterd-arm64
-netfilterd.exe
+/netfilterd
+/netfilterd-arm64
+/netfilterd.exe
 *.db
 *.db-wal
 *.db-shm
