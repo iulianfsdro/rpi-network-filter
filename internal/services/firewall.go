@@ -19,11 +19,12 @@ type FirewallService struct {
 	exec    *executor.Executor
 	cfg     config.Config
 	blocked *BlockedService
+	policy  *PolicyService
 	mu      sync.Mutex
 }
 
-func NewFirewallService(db *sql.DB, exec *executor.Executor, cfg config.Config, blocked *BlockedService) *FirewallService {
-	return &FirewallService{db: db, exec: exec, cfg: cfg, blocked: blocked}
+func NewFirewallService(db *sql.DB, exec *executor.Executor, cfg config.Config, blocked *BlockedService, policy *PolicyService) *FirewallService {
+	return &FirewallService{db: db, exec: exec, cfg: cfg, blocked: blocked, policy: policy}
 }
 
 func (s *FirewallService) ListRules() ([]models.FirewallRule, error) {
@@ -196,9 +197,20 @@ func (s *FirewallService) DeleteAllowedDomain(id int64) error {
 	return err
 }
 
-// ListActiveSetIPs returns the current IPs in the nftables allowed_domains set
-func (s *FirewallService) ListActiveSetIPs() []string {
-	result, err := s.exec.Run("nft", "-a", "list", "set", "inet", "filter", "allowed_domains")
+// ListActiveSetIPs returns the current IPs in a policy's nftables IP set.
+// With no policy id it falls back to the Default policy for v1-style callers.
+func (s *FirewallService) ListActiveSetIPs(policyID ...int64) []string {
+	var id int64
+	if len(policyID) > 0 && policyID[0] != 0 {
+		id = policyID[0]
+	} else {
+		def, err := s.policy.Default()
+		if err != nil {
+			return nil
+		}
+		id = def.ID
+	}
+	result, err := s.exec.Run("nft", "-a", "list", "set", "inet", "filter", policySetName(id))
 	if err != nil {
 		return nil
 	}
@@ -234,6 +246,43 @@ func (s *FirewallService) ListActiveSetIPs() []string {
 	return ips
 }
 
+// policySnapshot bundles everything Apply needs to generate per-policy
+// nftables chains in one atomic read of the DB state.
+type policySnapshot struct {
+	policies    []models.Policy
+	domainsByID map[int64][]models.PolicyDomain
+	assignments []models.DevicePolicy
+	defaultID   int64
+}
+
+func (s *FirewallService) loadPolicySnapshot() (policySnapshot, error) {
+	var snap policySnapshot
+	policies, err := s.policy.List()
+	if err != nil {
+		return snap, fmt.Errorf("list policies: %w", err)
+	}
+	snap.policies = policies
+
+	snap.domainsByID = make(map[int64][]models.PolicyDomain, len(policies))
+	for _, p := range policies {
+		if p.IsDefault {
+			snap.defaultID = p.ID
+		}
+		ds, err := s.policy.ListDomains(p.ID)
+		if err != nil {
+			return snap, fmt.Errorf("list domains for policy %d: %w", p.ID, err)
+		}
+		snap.domainsByID[p.ID] = ds
+	}
+
+	assignments, err := s.policy.ListAssignments()
+	if err != nil {
+		return snap, fmt.Errorf("list device-policy assignments: %w", err)
+	}
+	snap.assignments = assignments
+	return snap, nil
+}
+
 func (s *FirewallService) Apply() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -243,7 +292,7 @@ func (s *FirewallService) Apply() error {
 		return fmt.Errorf("list rules for apply: %w", err)
 	}
 
-	// Get blocked devices
+	// Blocked devices (hard drop, regardless of policy)
 	var blockedMACs []string
 	rows, err := s.db.Query("SELECT mac_address FROM devices WHERE is_blocked = 1")
 	if err != nil {
@@ -256,13 +305,12 @@ func (s *FirewallService) Apply() error {
 		blockedMACs = append(blockedMACs, mac)
 	}
 
-	// Fetch allowed domains for nftset config
-	allowedDomains, err := s.ListAllowedDomains()
+	snap, err := s.loadPolicySnapshot()
 	if err != nil {
-		log.Printf("[WARN] Failed to list allowed domains: %v", err)
+		return err
 	}
 
-	conf := s.generateConfig(rules, blockedMACs)
+	conf := s.generateConfig(rules, blockedMACs, snap)
 
 	if err := os.WriteFile("/etc/nftables.conf", []byte(conf), 0644); err != nil {
 		if !s.exec.DryRun {
@@ -275,40 +323,47 @@ func (s *FirewallService) Apply() error {
 		return fmt.Errorf("reload nftables: %w", err)
 	}
 
-	// Write dnsmasq nftset config so DNS queries auto-populate the set
-	if err := s.writeDnsmasqNftsets(allowedDomains); err != nil {
+	// Write dnsmasq nftset config (one line per domain × policy)
+	var totalDomains int
+	for _, ds := range snap.domainsByID {
+		totalDomains += len(ds)
+	}
+	if err := s.writeDnsmasqNftsets(snap); err != nil {
 		log.Printf("[WARN] Failed to write dnsmasq nftsets: %v", err)
-	} else if len(allowedDomains) > 0 {
-		// Only reload dnsmasq if the config was actually written
+	} else {
 		if _, err := s.exec.Run("systemctl", "reload", "dnsmasq"); err != nil {
 			log.Printf("[WARN] Failed to reload dnsmasq: %v", err)
 		}
 	}
 
-	log.Printf("[FIREWALL] Applied %d rules, %d blocked, %d allowed domains",
-		len(rules), len(blockedMACs), len(allowedDomains))
+	log.Printf("[FIREWALL] Applied %d global rules, %d blocked devices, %d policies, %d domain-policy mappings, %d device assignments",
+		len(rules), len(blockedMACs), len(snap.policies), totalDomains, len(snap.assignments))
 	return nil
 }
 
 // writeDnsmasqNftsets generates /etc/dnsmasq.d/netfilter-nftsets.conf with
-// one nftset= line per enabled allowed domain. dnsmasq will automatically add
-// resolved IPs to the nftables set when clients query these domains.
-func (s *FirewallService) writeDnsmasqNftsets(domains []models.AllowedDomain) error {
+// one nftset= line per (enabled domain × policy). dnsmasq auto-adds resolved
+// IPs to the correct policy-scoped nft set when clients query the domain.
+// The same domain can belong to multiple policies; each mapping produces its
+// own nftset= directive and both sets are populated on the same lookup.
+func (s *FirewallService) writeDnsmasqNftsets(snap policySnapshot) error {
 	var b strings.Builder
 	b.WriteString("# Generated by netfilterd — do not edit\n")
-	b.WriteString("# Maps DNS queries to the nftables 'allowed_domains' set for dynamic allow-listing\n\n")
+	b.WriteString("# Maps DNS queries to per-policy nftables sets for dynamic allow-listing\n\n")
 
 	count := 0
-	for _, d := range domains {
-		if !d.Enabled {
-			continue
+	for _, p := range snap.policies {
+		for _, d := range snap.domainsByID[p.ID] {
+			if !d.Enabled {
+				continue
+			}
+			domain := strings.ToLower(strings.TrimSpace(d.Domain))
+			if domain == "" {
+				continue
+			}
+			fmt.Fprintf(&b, "nftset=/%s/inet#filter#%s\n", domain, policySetName(p.ID))
+			count++
 		}
-		domain := strings.ToLower(strings.TrimSpace(d.Domain))
-		if domain == "" {
-			continue
-		}
-		fmt.Fprintf(&b, "nftset=/%s/inet#filter#allowed_domains\n", domain)
-		count++
 	}
 
 	path := "/etc/dnsmasq.d/netfilter-nftsets.conf"
@@ -321,7 +376,10 @@ func (s *FirewallService) writeDnsmasqNftsets(domains []models.AllowedDomain) er
 	return nil
 }
 
-func (s *FirewallService) generateConfig(rules []models.FirewallRule, blockedMACs []string) string {
+func policySetName(policyID int64) string   { return fmt.Sprintf("pol_%d_ips", policyID) }
+func policyChainName(policyID int64) string { return fmt.Sprintf("pol_%d_chain", policyID) }
+
+func (s *FirewallService) generateConfig(rules []models.FirewallRule, blockedMACs []string, snap policySnapshot) string {
 	var b strings.Builder
 
 	b.WriteString("#!/usr/sbin/nft -f\n\n")
@@ -338,15 +396,17 @@ func (s *FirewallService) generateConfig(rules []models.FirewallRule, blockedMAC
 	// Filter table
 	b.WriteString("table inet filter {\n")
 
-	// Dynamic set for allow-listed domains (populated by dnsmasq via nftset=)
-	// Timeout: entries expire 1 hour after last addition (re-added on next query)
-	b.WriteString("    set allowed_domains {\n")
-	b.WriteString("        type ipv4_addr\n")
-	b.WriteString("        flags timeout\n")
-	b.WriteString("        timeout 1h\n")
-	b.WriteString("    }\n\n")
+	// One IP set per policy. 30-day timeout; a re-resolve cron refreshes
+	// entries before they age out so long-idle connections don't break.
+	for _, p := range snap.policies {
+		fmt.Fprintf(&b, "    set %s {\n", policySetName(p.ID))
+		b.WriteString("        type ipv4_addr\n")
+		b.WriteString("        flags timeout\n")
+		b.WriteString("        timeout 30d\n")
+		b.WriteString("    }\n\n")
+	}
 
-	// Input chain
+	// Input chain (unchanged)
 	b.WriteString("    chain input {\n")
 	b.WriteString("        type filter hook input priority filter; policy drop;\n")
 	b.WriteString("        ct state established,related accept\n")
@@ -359,42 +419,68 @@ func (s *FirewallService) generateConfig(rules []models.FirewallRule, blockedMAC
 	b.WriteString("        iifname \"lo\" accept\n")
 	b.WriteString("    }\n\n")
 
-	// Forward chain — DEFAULT DENY: all client traffic is dropped unless explicitly allowed
+	// One chain per policy. Each chain:
+	//   - accepts on IP-set hit (with a per-policy log prefix for traffic mon)
+	//   - on miss:
+	//       strict policy:     drops with a [NETFILTER-DROP pol=Name] log
+	//       permissive policy: jumps to the default policy's chain
+	//   - the default policy's chain is always terminal (final drop log).
+	// Global user-defined forward rules live inside the default chain so
+	// strict policies can't be bypassed by a broad global "accept tcp 443"
+	// rule.
+	for _, p := range snap.policies {
+		fmt.Fprintf(&b, "    chain %s {\n", policyChainName(p.ID))
+		fmt.Fprintf(&b, "        ip daddr @%s log prefix \"[NETFILTER-ACCEPT pol=%s] \" accept\n",
+			policySetName(p.ID), p.Name)
+
+		if p.IsDefault {
+			// Global user-defined forward rules — only run for devices routed
+			// to the default policy (unassigned + explicitly default-assigned).
+			for _, r := range rules {
+				if !r.Enabled || r.Direction != "forward" {
+					continue
+				}
+				for _, line := range s.buildRuleLines(r) {
+					fmt.Fprintf(&b, "        %s\n", line)
+				}
+			}
+			fmt.Fprintf(&b, "        ct state new log prefix \"[NETFILTER-DROP pol=%s] \"\n", p.Name)
+		} else if p.Mode == "strict" {
+			fmt.Fprintf(&b, "        ct state new log prefix \"[NETFILTER-DROP pol=%s] \"\n", p.Name)
+		} else {
+			// permissive non-default — fall through to default chain
+			fmt.Fprintf(&b, "        jump %s\n", policyChainName(snap.defaultID))
+		}
+		b.WriteString("    }\n\n")
+	}
+
+	// Top-level forward chain: conntrack fast-path, hard drops for blocked
+	// devices, per-MAC policy dispatch via vmap (goto — no return), then
+	// fallback jump into the default chain for unassigned devices.
 	b.WriteString("    chain forward {\n")
 	b.WriteString("        type filter hook forward priority filter; policy drop;\n")
 	b.WriteString("        ct state established,related accept\n")
-
-	// Blocked devices — explicit drop before any accept rules
 	for _, mac := range blockedMACs {
 		fmt.Fprintf(&b, "        ether saddr %s drop\n", strings.ToLower(mac))
 	}
-
-	// Accept traffic to dynamically allow-listed domains
-	// (IPs are auto-added by dnsmasq when clients resolve allowed domains)
-	b.WriteString("        ip daddr @allowed_domains log prefix \"[NETFILTER-ACCEPT] \" accept\n")
-
-	// User-defined rules (accept rules allow specific traffic through)
-	for _, r := range rules {
-		if !r.Enabled {
-			continue
+	if len(snap.assignments) > 0 {
+		b.WriteString("        ether saddr vmap {\n")
+		for i, a := range snap.assignments {
+			comma := ","
+			if i == len(snap.assignments)-1 {
+				comma = ""
+			}
+			fmt.Fprintf(&b, "            %s : goto %s%s\n",
+				strings.ToLower(a.DeviceMAC), policyChainName(a.PolicyID), comma)
 		}
-		if r.Direction != "forward" {
-			continue
-		}
-		for _, line := range s.buildRuleLines(r) {
-			fmt.Fprintf(&b, "        %s\n", line)
-		}
+		b.WriteString("        }\n")
 	}
-
-	// Log all new connection attempts that reach default drop (for traffic monitor)
-	b.WriteString("        ct state new log prefix \"[NETFILTER-DROP] \"\n")
-
+	fmt.Fprintf(&b, "        jump %s\n", policyChainName(snap.defaultID))
 	b.WriteString("    }\n\n")
 
-	// Output chain
+	// Output chain (unchanged)
 	b.WriteString("    chain output {\n")
 	b.WriteString("        type filter hook output priority filter; policy accept;\n")
-
 	for _, r := range rules {
 		if !r.Enabled || r.Direction != "outbound" {
 			continue
@@ -403,8 +489,8 @@ func (s *FirewallService) generateConfig(rules []models.FirewallRule, blockedMAC
 			fmt.Fprintf(&b, "        %s\n", line)
 		}
 	}
-
 	b.WriteString("    }\n")
+
 	b.WriteString("}\n")
 
 	return b.String()

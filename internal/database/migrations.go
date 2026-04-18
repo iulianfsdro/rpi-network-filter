@@ -153,14 +153,23 @@ var migrations = []string{
 	// miss; 'strict' drops on a miss) and its own set of allowed domains that
 	// populate a dedicated nftables IP set.
 	//
-	// Data migration: existing allowed_domains rows move into a new 'Default'
-	// permissive policy. A 'Tesla' strict policy is seeded with exactly one
-	// entry (connman.vn.tesla.services) — the connection-manager endpoint that
-	// keeps the car online without exposing OTA/diagnostic channels.
+	// Default policy ships as STRICT with an EMPTY allow list. Unassigned
+	// devices fall back to Default, so new devices joining the hotspot are
+	// blocked by default until explicitly authorised in the UI. This is a
+	// deliberate departure from v1's "permissive global list" model — security
+	// posture first.
 	//
-	// Also tracks per-entry resolution metadata (resolved_ips, last_resolved_at,
-	// hit_count) so the UI can show "is this allow rule actually working?" at a
-	// glance, addressing the main v1 UX complaint.
+	// Existing v1 allowed_domains entries are intentionally NOT migrated (per
+	// user decision during v2 design). Users who want to restore them can
+	// re-add from the v1 DB snapshot kept at /var/lib/netfilterd/netfilter.db.
+	//
+	// Tesla policy is strict with exactly one entry (connman.vn.tesla.services)
+	// — the connection-manager endpoint that keeps the car online without
+	// exposing OTA/diagnostic channels.
+	//
+	// Per-entry resolution metadata (resolved_ips, last_resolved_at, hit_count)
+	// is populated by the re-resolve cron so the UI can answer "is this rule
+	// actually working?" — addresses the main v1 UX complaint.
 	`CREATE TABLE IF NOT EXISTS policies (
 		id          INTEGER PRIMARY KEY AUTOINCREMENT,
 		name        TEXT NOT NULL UNIQUE,
@@ -194,12 +203,8 @@ var migrations = []string{
 	);
 
 	INSERT OR IGNORE INTO policies (name, mode, description, is_default) VALUES
-		('Default', 'permissive', 'Fallback policy for devices with no explicit assignment. Accepts any allow-listed domain.', 1),
-		('Tesla',   'strict',     'Tesla vehicle policy: connman keeps the car online; everything else blocked including OTA, diagnostics, and CDN.', 0);
-
-	INSERT OR IGNORE INTO policy_allowed_domains (policy_id, domain, description)
-	SELECT (SELECT id FROM policies WHERE name='Default'), domain, description
-	FROM allowed_domains;
+		('Default', 'strict', 'Fallback policy for devices with no explicit assignment. Strict + empty by default — unassigned devices are blocked until you authorise them.', 1),
+		('Tesla',   'strict', 'Tesla vehicle policy: connman keeps the car online; everything else blocked including OTA, diagnostics, and CDN.', 0);
 
 	INSERT OR IGNORE INTO policy_allowed_domains (policy_id, domain, description)
 	SELECT id, 'connman.vn.tesla.services', 'Tesla connection-manager; keeps car online without exposing OTA.'

@@ -19,16 +19,18 @@ type Services struct {
 	System     *SystemService
 	Audit      *AuditService
 	TrafficLog *TrafficLogService
+	Policy     *PolicyService
 }
 
 func New(db *sql.DB, exec *executor.Executor, cfg config.Config) *Services {
 	audit := NewAuditService(db)
 	trafficLog := NewTrafficLogService(db)
 	blocked := NewBlockedService(db)
+	policy := NewPolicyService(db, blocked)
 	return &Services{
 		Auth:       NewAuthService(db),
 		Network:    NewNetworkService(db, cfg),
-		Firewall:   NewFirewallService(db, exec, cfg, blocked),
+		Firewall:   NewFirewallService(db, exec, cfg, blocked, policy),
 		DNS:        NewDNSService(db, exec, blocked),
 		Blocked:    blocked,
 		Bandwidth:  NewBandwidthService(db, exec, cfg),
@@ -36,6 +38,7 @@ func New(db *sql.DB, exec *executor.Executor, cfg config.Config) *Services {
 		System:     NewSystemService(exec, cfg),
 		Audit:      audit,
 		TrafficLog: trafficLog,
+		Policy:     policy,
 	}
 }
 
