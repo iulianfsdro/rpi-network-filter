@@ -205,6 +205,7 @@ fi
 
 cat > /etc/netfilterd/config.yaml << YAML
 listen_addr: "192.168.4.1:8443"
+use_tls: true
 tls_cert: "/etc/netfilterd/server.crt"
 tls_key: "/etc/netfilterd/server.key"
 db_path: "/var/lib/netfilterd/netfilter.db"
