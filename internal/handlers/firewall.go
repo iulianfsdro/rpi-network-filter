@@ -14,6 +14,7 @@ import (
 
 type FirewallHandler struct {
 	firewall *services.FirewallService
+	policy   *services.PolicyService
 	audit    *services.AuditService
 	renderer *Renderer
 }
@@ -21,6 +22,7 @@ type FirewallHandler struct {
 func NewFirewallHandler(svc *services.Services, renderer *Renderer) *FirewallHandler {
 	return &FirewallHandler{
 		firewall: svc.Firewall,
+		policy:   svc.Policy,
 		audit:    svc.Audit,
 		renderer: renderer,
 	}
@@ -77,6 +79,7 @@ func (h *FirewallHandler) CreateAllowedDomain(w http.ResponseWriter, r *http.Req
 		JSONError(w, http.StatusInternalServerError, "saved but failed to apply: "+err.Error())
 		return
 	}
+	go h.policy.ResolveDomain(d.Domain)
 	JSON(w, http.StatusCreated, map[string]any{"id": id})
 }
 

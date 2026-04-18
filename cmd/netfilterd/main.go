@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/iulianfsdro/rpi-network-filter/internal/config"
 	"github.com/iulianfsdro/rpi-network-filter/internal/database"
@@ -79,6 +80,10 @@ func main() {
 	// Start background services
 	go svc.Network.StartScanner()
 	svc.TrafficLog.StartTailing()
+	// Periodic re-resolve of allow-list domains so the per-policy nft sets
+	// stay populated even when clients cache DNS answers past the dnsmasq
+	// TTL. 6 hours is aggressive enough to matter, rare enough to be cheap.
+	svc.Policy.StartRefreshLoop(6 * time.Hour)
 
 	router := handlers.NewRouterWithFS(db, svc, cfg, web.Content)
 

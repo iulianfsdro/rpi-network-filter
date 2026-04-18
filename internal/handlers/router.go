@@ -43,6 +43,7 @@ func NewRouterWithFS(db *sql.DB, svc *services.Services, cfg config.Config, webF
 	dnsH := NewDNSHandler(svc, renderer)
 	blockH := NewBlockedHandler(svc, renderer)
 	bwH := NewBandwidthHandler(svc, renderer)
+	polH := NewPoliciesHandler(svc, renderer)
 	settingsH := NewSettingsHandler(db, svc, renderer)
 	sysH := NewSystemHandler(svc)
 
@@ -65,6 +66,7 @@ func NewRouterWithFS(db *sql.DB, svc *services.Services, cfg config.Config, webF
 		r.Get("/devices", devH.Page)
 		r.Get("/firewall", fwH.Page)
 		r.Get("/allowlist", fwH.AllowListPage)
+		r.Get("/policies", polH.Page)
 		r.Get("/blocklist", blockH.Page)
 		r.Get("/dns", dnsH.Page)
 		r.Get("/bandwidth", bwH.Page)
@@ -84,6 +86,21 @@ func NewRouterWithFS(db *sql.DB, svc *services.Services, cfg config.Config, webF
 			r.Route("/devices", func(r chi.Router) {
 				r.Get("/", devH.List)
 				r.Put("/{mac}", devH.Update)
+				r.Put("/{mac}/policy", polH.AssignDevice)
+				r.Delete("/{mac}/policy", polH.UnassignDevice)
+			})
+
+			r.Route("/policies", func(r chi.Router) {
+				r.Get("/", polH.List)
+				r.Post("/", polH.Create)
+				r.Get("/assignments", polH.ListAssignments)
+				r.Get("/{id}", polH.Get)
+				r.Put("/{id}", polH.Update)
+				r.Delete("/{id}", polH.Delete)
+				r.Get("/{id}/domains", polH.ListDomains)
+				r.Post("/{id}/domains", polH.CreateDomain)
+				r.Put("/domains/{domainID}", polH.UpdateDomain)
+				r.Delete("/domains/{domainID}", polH.DeleteDomain)
 			})
 
 			r.Route("/firewall/rules", func(r chi.Router) {

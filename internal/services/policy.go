@@ -1,10 +1,15 @@
 package services
 
 import (
+	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
+	"net"
 	"strings"
+	"time"
 
 	"github.com/iulianfsdro/rpi-network-filter/internal/models"
 )
@@ -206,6 +211,89 @@ func (s *PolicyService) UpdateDomain(id int64, d models.PolicyDomain) error {
 func (s *PolicyService) DeleteDomain(id int64) error {
 	_, err := s.db.Exec("DELETE FROM policy_allowed_domains WHERE id = ?", id)
 	return err
+}
+
+// ResolveDomain queries the local dnsmasq (via /etc/resolv.conf) for `domain`
+// so that dnsmasq's nftset= directive populates the matching nft set before
+// the first client tries to connect. Addresses v1's "allowed but still
+// blocked" race where the set was empty until a client's own DNS query
+// fired. Should be called AFTER FirewallService.Apply has reloaded dnsmasq
+// with the new nftset= line for this domain. Safe to call in a goroutine.
+//
+// Also writes the resolved IPs + timestamp back to the row so the UI can
+// show "last resolved X.X.X.X at <time>".
+func (s *PolicyService) ResolveDomain(domain string) {
+	domain = NormalizeDomain(domain)
+	if domain == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	resolver := &net.Resolver{PreferGo: true}
+	ips, err := resolver.LookupHost(ctx, domain)
+	if err != nil {
+		log.Printf("[POLICY] proactive resolve %s: %v", domain, err)
+		return
+	}
+	log.Printf("[POLICY] proactive resolve %s -> %v", domain, ips)
+
+	payload, _ := json.Marshal(ips)
+	if _, err := s.db.Exec(`
+		UPDATE policy_allowed_domains
+		SET resolved_ips = ?, last_resolved_at = CURRENT_TIMESTAMP
+		WHERE domain = ?
+	`, string(payload), domain); err != nil {
+		log.Printf("[POLICY] write resolved_ips for %s: %v", domain, err)
+	}
+}
+
+// RefreshAll iterates every enabled (policy × domain) row and issues a DNS
+// query through the local dnsmasq so the per-policy nft sets stay populated
+// between natural client queries. Called by the periodic re-resolve cron.
+func (s *PolicyService) RefreshAll() {
+	rows, err := s.db.Query(`
+		SELECT DISTINCT domain FROM policy_allowed_domains WHERE enabled = 1
+	`)
+	if err != nil {
+		log.Printf("[POLICY] refresh: list domains: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	var domains []string
+	for rows.Next() {
+		var d string
+		if err := rows.Scan(&d); err == nil {
+			domains = append(domains, d)
+		}
+	}
+	log.Printf("[POLICY] refresh: re-resolving %d domains", len(domains))
+	for _, d := range domains {
+		s.ResolveDomain(d)
+	}
+}
+
+// StartRefreshLoop kicks off a background goroutine that calls RefreshAll
+// every `interval`. The returned cancel function stops the loop; callers
+// pass it to the process shutdown hook.
+func (s *PolicyService) StartRefreshLoop(interval time.Duration) context.CancelFunc {
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		// First refresh happens 30s after boot so dnsmasq has finished starting.
+		timer := time.NewTimer(30 * time.Second)
+		defer timer.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-timer.C:
+				s.RefreshAll()
+				timer.Reset(interval)
+			}
+		}
+	}()
+	return cancel
 }
 
 // ── Device assignments ─────────────────────────────────────────
