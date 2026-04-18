@@ -50,6 +50,15 @@ func NewRouterWithFS(db *sql.DB, svc *services.Services, cfg config.Config, webF
 	// Static assets
 	r.Handle("/static/*", http.StripPrefix("/static/", http.FileServer(http.FS(staticFS))))
 
+	// Public cert download so clients can install netfilterd's self-signed
+	// cert as a trusted root and get green-lock HTTPS. Chicken-and-egg
+	// note: the browser will still complain about the cert warning once
+	// (user clicks through), then downloads this file, installs it, and
+	// from then on sees a trusted connection.
+	r.Get("/netfilter-ca.crt", func(w http.ResponseWriter, r *http.Request) {
+		http.ServeFile(w, r, cfg.TLSCert)
+	})
+
 	// Public routes
 	r.Get("/login", authH.LoginPage)
 

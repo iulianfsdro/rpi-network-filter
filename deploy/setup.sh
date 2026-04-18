@@ -192,13 +192,41 @@ mkdir -p /etc/netfilterd /var/lib/netfilterd
 # --- TLS cert ----------------------------------------------------------------
 
 if [[ ! -f /etc/netfilterd/server.crt ]] || [[ ! -f /etc/netfilterd/server.key ]]; then
-    info "Generating self-signed TLS certificate..."
-    openssl req -x509 -newkey rsa:2048 \
+    info "Generating self-signed TLS certificate with SANs..."
+    cat > /tmp/netfilter-openssl.cnf <<'CNF'
+[req]
+default_bits       = 2048
+prompt             = no
+default_md         = sha256
+distinguished_name = dn
+req_extensions     = v3_req
+x509_extensions    = v3_req
+
+[dn]
+C  = US
+O  = NetFilter Appliance
+CN = netfilter.local
+
+[v3_req]
+basicConstraints     = CA:TRUE
+keyUsage             = digitalSignature, keyEncipherment, keyCertSign
+extendedKeyUsage     = serverAuth
+subjectAltName       = @alt_names
+
+[alt_names]
+DNS.1 = netfilter.local
+DNS.2 = netfilter
+IP.1  = 192.168.4.1
+IP.2  = 127.0.0.1
+CNF
+    openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
         -keyout /etc/netfilterd/server.key \
         -out /etc/netfilterd/server.crt \
-        -days 3650 -nodes \
-        -subj "/CN=netfilter.local" 2>/dev/null
+        -config /tmp/netfilter-openssl.cnf \
+        -extensions v3_req 2>/dev/null
+    rm -f /tmp/netfilter-openssl.cnf
     chmod 600 /etc/netfilterd/server.key
+    chmod 644 /etc/netfilterd/server.crt
 fi
 
 # --- App config --------------------------------------------------------------
