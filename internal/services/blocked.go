@@ -11,7 +11,7 @@ import (
 
 // BlockedService manages the denylist of domains that must never be
 // reachable — even via the allow-list. It is used as a guard before
-// inserting into allowed_domains and as a DNS sinkhole source.
+// inserting into policy_allowed_domains and as a DNS sinkhole source.
 type BlockedService struct {
 	db *sql.DB
 }

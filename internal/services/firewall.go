@@ -92,11 +92,29 @@ func (s *FirewallService) DeleteRule(id int64) error {
 }
 
 // ── Allowed Domains CRUD ───────────────────────────────────────
+//
+// v2: entries live in policy_allowed_domains, one row per (policy, domain).
+// The legacy handlers (ListAllowedDomains / CreateAllowedDomain / …) operate
+// on the `Default` policy so existing API clients keep working unchanged.
+// The per-policy variants (ListPolicyDomains, etc.) are used by the new
+// Policies page.
+
+// defaultPolicyID returns the id of the built-in `Default` (permissive) policy.
+func (s *FirewallService) defaultPolicyID() (int64, error) {
+	var id int64
+	if err := s.db.QueryRow(`SELECT id FROM policies WHERE is_default = 1 LIMIT 1`).Scan(&id); err != nil {
+		return 0, fmt.Errorf("lookup default policy: %w", err)
+	}
+	return id, nil
+}
 
 func (s *FirewallService) ListAllowedDomains() ([]models.AllowedDomain, error) {
 	rows, err := s.db.Query(`
-		SELECT id, domain, description, enabled, created_at
-		FROM allowed_domains ORDER BY domain ASC
+		SELECT pad.id, pad.domain, pad.description, pad.enabled, pad.created_at
+		FROM policy_allowed_domains pad
+		JOIN policies p ON p.id = pad.policy_id
+		WHERE p.is_default = 1
+		ORDER BY pad.domain ASC
 	`)
 	if err != nil {
 		return nil, fmt.Errorf("query allowed domains: %w", err)
@@ -116,11 +134,10 @@ func (s *FirewallService) ListAllowedDomains() ([]models.AllowedDomain, error) {
 	return domains, nil
 }
 
-// CreateAllowedDomain inserts a new allow-list entry, or if the domain already
-// exists, re-enables it and returns the existing ID. This makes the quick-allow
-// button in the traffic monitor idempotent: clicking Allow on the same domain
-// twice (or across two different log rows for the same domain) no longer
-// returns a UNIQUE constraint error.
+// CreateAllowedDomain inserts a new allow-list entry into the Default policy,
+// or if the domain already exists there, re-enables it and returns the
+// existing ID. Idempotent so the quick-allow button in the traffic monitor
+// is safe to click twice.
 func (s *FirewallService) CreateAllowedDomain(d models.AllowedDomain) (int64, error) {
 	enabled := 0
 	if d.Enabled {
@@ -142,17 +159,20 @@ func (s *FirewallService) CreateAllowedDomain(d models.AllowedDomain) (int64, er
 		}
 	}
 
-	// Upsert: if the row exists, keep its ID and re-apply the incoming
-	// description/enabled values. Returns the row's id.
+	policyID, err := s.defaultPolicyID()
+	if err != nil {
+		return 0, err
+	}
+
 	var id int64
-	err := s.db.QueryRow(`
-		INSERT INTO allowed_domains (domain, description, enabled)
-		VALUES (?, ?, ?)
-		ON CONFLICT(domain) DO UPDATE SET
-			description = CASE WHEN excluded.description != '' THEN excluded.description ELSE allowed_domains.description END,
+	err = s.db.QueryRow(`
+		INSERT INTO policy_allowed_domains (policy_id, domain, description, enabled)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(policy_id, domain) DO UPDATE SET
+			description = CASE WHEN excluded.description != '' THEN excluded.description ELSE policy_allowed_domains.description END,
 			enabled     = excluded.enabled
 		RETURNING id
-	`, domain, d.Description, enabled).Scan(&id)
+	`, policyID, domain, d.Description, enabled).Scan(&id)
 	if err != nil {
 		return 0, fmt.Errorf("upsert allowed domain: %w", err)
 	}
@@ -165,14 +185,14 @@ func (s *FirewallService) UpdateAllowedDomain(id int64, d models.AllowedDomain) 
 		enabled = 1
 	}
 	_, err := s.db.Exec(
-		"UPDATE allowed_domains SET description=?, enabled=? WHERE id=?",
+		"UPDATE policy_allowed_domains SET description=?, enabled=? WHERE id=?",
 		d.Description, enabled, id,
 	)
 	return err
 }
 
 func (s *FirewallService) DeleteAllowedDomain(id int64) error {
-	_, err := s.db.Exec("DELETE FROM allowed_domains WHERE id = ?", id)
+	_, err := s.db.Exec("DELETE FROM policy_allowed_domains WHERE id = ?", id)
 	return err
 }
 

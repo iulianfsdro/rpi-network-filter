@@ -146,6 +146,66 @@ var migrations = []string{
 		('tesla-cdn.net',               'suffix', 'Tesla asset and firmware CDN'),
 		('diag.vn.tesla.services',      'exact',  'Tesla remote diagnostics'),
 		('remote-diagnostics.tesla.com','suffix', 'Tesla remote service access');`,
+
+	// v6: per-policy allow-listing — replaces the single global allow list with
+	// named policies that can be assigned to specific devices. Each policy has
+	// its own mode ('permissive' falls back to the global default chain on a
+	// miss; 'strict' drops on a miss) and its own set of allowed domains that
+	// populate a dedicated nftables IP set.
+	//
+	// Data migration: existing allowed_domains rows move into a new 'Default'
+	// permissive policy. A 'Tesla' strict policy is seeded with exactly one
+	// entry (connman.vn.tesla.services) — the connection-manager endpoint that
+	// keeps the car online without exposing OTA/diagnostic channels.
+	//
+	// Also tracks per-entry resolution metadata (resolved_ips, last_resolved_at,
+	// hit_count) so the UI can show "is this allow rule actually working?" at a
+	// glance, addressing the main v1 UX complaint.
+	`CREATE TABLE IF NOT EXISTS policies (
+		id          INTEGER PRIMARY KEY AUTOINCREMENT,
+		name        TEXT NOT NULL UNIQUE,
+		mode        TEXT NOT NULL DEFAULT 'permissive' CHECK(mode IN ('permissive','strict')),
+		description TEXT DEFAULT '',
+		is_default  INTEGER DEFAULT 0,
+		created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+	);
+
+	CREATE UNIQUE INDEX IF NOT EXISTS idx_policies_default ON policies(is_default) WHERE is_default = 1;
+
+	CREATE TABLE IF NOT EXISTS policy_allowed_domains (
+		id                INTEGER PRIMARY KEY AUTOINCREMENT,
+		policy_id         INTEGER NOT NULL REFERENCES policies(id) ON DELETE CASCADE,
+		domain            TEXT NOT NULL,
+		description       TEXT DEFAULT '',
+		enabled           INTEGER DEFAULT 1,
+		resolved_ips      TEXT DEFAULT '',
+		last_resolved_at  DATETIME,
+		hit_count         INTEGER DEFAULT 0,
+		created_at        DATETIME DEFAULT CURRENT_TIMESTAMP,
+		UNIQUE(policy_id, domain)
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_policy_domains_policy ON policy_allowed_domains(policy_id);
+
+	CREATE TABLE IF NOT EXISTS device_policies (
+		device_mac   TEXT PRIMARY KEY,
+		policy_id    INTEGER NOT NULL REFERENCES policies(id) ON DELETE CASCADE,
+		assigned_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+	);
+
+	INSERT OR IGNORE INTO policies (name, mode, description, is_default) VALUES
+		('Default', 'permissive', 'Fallback policy for devices with no explicit assignment. Accepts any allow-listed domain.', 1),
+		('Tesla',   'strict',     'Tesla vehicle policy: connman keeps the car online; everything else blocked including OTA, diagnostics, and CDN.', 0);
+
+	INSERT OR IGNORE INTO policy_allowed_domains (policy_id, domain, description)
+	SELECT (SELECT id FROM policies WHERE name='Default'), domain, description
+	FROM allowed_domains;
+
+	INSERT OR IGNORE INTO policy_allowed_domains (policy_id, domain, description)
+	SELECT id, 'connman.vn.tesla.services', 'Tesla connection-manager; keeps car online without exposing OTA.'
+	FROM policies WHERE name='Tesla';
+
+	DROP TABLE allowed_domains;`,
 }
 
 func Migrate(db *sql.DB) error {
