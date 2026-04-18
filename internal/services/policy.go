@@ -19,6 +19,10 @@ var (
 	ErrDefaultPolicyLock = errors.New("the default policy cannot be deleted or have its is_default flag cleared")
 )
 
+func validMode(m string) bool {
+	return m == "permissive" || m == "strict" || m == "open"
+}
+
 // PolicyService owns CRUD over policies, per-policy allow lists, and
 // device→policy assignments. The FirewallService reads from this service
 // when generating nftables rules; it does not write back.
@@ -92,7 +96,7 @@ func (s *PolicyService) Create(p models.Policy) (int64, error) {
 	if strings.TrimSpace(p.Name) == "" {
 		return 0, fmt.Errorf("policy name is required")
 	}
-	if p.Mode != "permissive" && p.Mode != "strict" {
+	if !validMode(p.Mode) {
 		p.Mode = "permissive"
 	}
 	// New policies never assume the default flag — transfer happens via SetDefault.
@@ -107,7 +111,7 @@ func (s *PolicyService) Create(p models.Policy) (int64, error) {
 }
 
 func (s *PolicyService) Update(id int64, p models.Policy) error {
-	if p.Mode != "permissive" && p.Mode != "strict" {
+	if !validMode(p.Mode) {
 		return fmt.Errorf("invalid mode %q", p.Mode)
 	}
 	_, err := s.db.Exec(`

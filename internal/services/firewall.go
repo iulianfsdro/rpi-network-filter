@@ -489,9 +489,17 @@ func (s *FirewallService) generateConfig(rules []models.FirewallRule, blockedMAC
 		fmt.Fprintf(&b, "        ip daddr @%s log prefix \"[NETFILTER-ACCEPT pol=%s] \" accept\n",
 			policySetName(p.ID), p.Name)
 
-		if p.IsDefault {
-			// Global user-defined forward rules — only run for devices routed
-			// to the default policy (unassigned + explicitly default-assigned).
+		switch {
+		case p.Mode == "open":
+			// Open policy: allow anything not already caught by the hard
+			// block-list (DNS-sinkholed globally) or the DoH/DoT chokepoint
+			// (dropped before the vmap dispatch). No per-packet log — open
+			// traffic volume would spam journald.
+			b.WriteString("        accept\n")
+		case p.IsDefault:
+			// Global user-defined forward rules — only run for devices
+			// routed to the default policy (unassigned + explicitly
+			// default-assigned).
 			for _, r := range rules {
 				if !r.Enabled || r.Direction != "forward" {
 					continue
@@ -501,9 +509,9 @@ func (s *FirewallService) generateConfig(rules []models.FirewallRule, blockedMAC
 				}
 			}
 			fmt.Fprintf(&b, "        ct state new log prefix \"[NETFILTER-DROP pol=%s] \"\n", p.Name)
-		} else if p.Mode == "strict" {
+		case p.Mode == "strict":
 			fmt.Fprintf(&b, "        ct state new log prefix \"[NETFILTER-DROP pol=%s] \"\n", p.Name)
-		} else {
+		default:
 			// permissive non-default — fall through to default chain
 			fmt.Fprintf(&b, "        jump %s\n", policyChainName(snap.defaultID))
 		}

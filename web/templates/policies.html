@@ -26,6 +26,7 @@
                 <select x-model="form.mode">
                     <option value="strict">strict — drop on miss</option>
                     <option value="permissive">permissive — fall through to Default</option>
+                    <option value="open">open — allow everything (trusted devices)</option>
                 </select>
             </label>
         </div>
@@ -47,7 +48,7 @@
                     <div>
                         <h5 style="margin:0;" x-text="p.name"></h5>
                         <div style="font-size:0.8rem; color:var(--text-muted); margin-top:0.25rem;">
-                            <span :style="'color:' + (p.mode === 'strict' ? 'var(--danger)' : 'var(--text-muted)')" x-text="p.mode"></span>
+                            <span :style="'color:' + (p.mode === 'strict' ? 'var(--danger)' : (p.mode === 'open' ? 'var(--warning, #d69e00)' : 'var(--text-muted)'))" x-text="p.mode"></span>
                             <span x-show="p.is_default" style="margin-left:0.5rem; background:var(--primary); color:white; padding:0.1rem 0.4rem; border-radius:3px;">default</span>
                             <span x-show="p.description" style="margin-left:0.5rem;" x-text="' — ' + p.description"></span>
                         </div>
@@ -60,9 +61,14 @@
             </header>
 
             <div x-show="expanded === p.id" x-transition>
+                <p x-show="p.mode === 'open'" style="background:var(--surface-3); padding:0.5rem 0.75rem; border-radius:4px; font-size:0.85rem; color:var(--text-muted); margin-top:0.5rem;">
+                    Open-mode policies ignore the allow list — devices assigned here
+                    reach any destination not blocked globally (hard block-list,
+                    DoH/DoT chokepoint). Use for your own phone / laptop / TV.
+                </p>
                 <!-- Domains -->
-                <h6 style="margin:0.5rem 0;">Allowed domains</h6>
-                <div style="display:flex; gap:0.4rem; margin-bottom:0.5rem;">
+                <h6 style="margin:0.5rem 0;" x-show="p.mode !== 'open'">Allowed domains</h6>
+                <div style="display:flex; gap:0.4rem; margin-bottom:0.5rem;" x-show="p.mode !== 'open'">
                     <input type="text" x-model="domainForm[p.id]" placeholder="add domain, e.g. example.com" style="flex:1;" @keyup.enter="addDomain(p)">
                     <button type="button" @click="addDomain(p)">Add</button>
                 </div>

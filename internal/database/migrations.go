@@ -228,6 +228,37 @@ var migrations = []string{
 	// ended up verbatim in the generated nftables ruleset and broke
 	// the Apply() call with "unexpected string, expecting colon".
 	`DELETE FROM device_policies WHERE instr(device_mac, '%') > 0;`,
+
+	// v9: add 'open' as a valid policy mode. An open-mode policy's
+	// chain is a single `accept` rule — the hard block-list and the
+	// DoH/DoT chokepoint still apply (they run before the per-MAC
+	// vmap dispatch), but everything else is unconditionally allowed.
+	// Required for trusted devices (owner phone, laptop, TV) where
+	// curating a hostname allow list is impractical.
+	//
+	// SQLite can't ALTER a CHECK constraint in place — rebuild the
+	// table and copy rows. FK references from device_policies use
+	// the plain id so the drop+rename is safe (PRAGMA foreign_keys
+	// defaults off in this build).
+	`CREATE TABLE policies_new (
+		id          INTEGER PRIMARY KEY AUTOINCREMENT,
+		name        TEXT NOT NULL UNIQUE,
+		mode        TEXT NOT NULL DEFAULT 'permissive' CHECK(mode IN ('permissive','strict','open')),
+		description TEXT DEFAULT '',
+		is_default  INTEGER DEFAULT 0,
+		created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+	);
+
+	INSERT INTO policies_new (id, name, mode, description, is_default, created_at)
+	SELECT id, name, mode, description, is_default, created_at FROM policies;
+
+	DROP TABLE policies;
+	ALTER TABLE policies_new RENAME TO policies;
+
+	CREATE UNIQUE INDEX IF NOT EXISTS idx_policies_default ON policies(is_default) WHERE is_default = 1;
+
+	INSERT OR IGNORE INTO policies (name, mode, description, is_default) VALUES
+		('Open', 'open', 'Trusted devices — no allow-list filtering. Hard block-list + DoH/DoT chokepoint still apply.', 0);`,
 }
 
 func Migrate(db *sql.DB) error {
