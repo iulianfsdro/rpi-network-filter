@@ -1,0 +1,18 @@
+[Unit]
+Description=NetFilter wlan0 static IP configuration
+After=sys-subsystem-net-devices-wlan0.device NetworkManager.service
+Wants=sys-subsystem-net-devices-wlan0.device
+Before=hostapd.service dnsmasq.service netfilterd.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=-/usr/sbin/rfkill unblock wifi
+ExecStartPre=-/usr/bin/nmcli device set wlan0 managed no
+ExecStart=/sbin/ip addr flush dev wlan0
+ExecStart=/sbin/ip addr add 192.168.4.1/24 dev wlan0
+ExecStart=/sbin/ip link set wlan0 up
+ExecStartPost=/bin/sleep 1
+
+[Install]
+WantedBy=multi-user.target
