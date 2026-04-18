@@ -93,8 +93,9 @@ func (s *PolicyService) Default() (models.Policy, error) {
 }
 
 func (s *PolicyService) Create(p models.Policy) (int64, error) {
-	if strings.TrimSpace(p.Name) == "" {
-		return 0, fmt.Errorf("policy name is required")
+	p.Name = strings.TrimSpace(p.Name)
+	if !ValidPolicyName(p.Name) {
+		return 0, fmt.Errorf("invalid policy name: must be 1-64 chars, letters/digits/space/_/- only (start alphanumeric)")
 	}
 	if !validMode(p.Mode) {
 		p.Mode = "permissive"
@@ -111,13 +112,20 @@ func (s *PolicyService) Create(p models.Policy) (int64, error) {
 }
 
 func (s *PolicyService) Update(id int64, p models.Policy) error {
+	p.Name = strings.TrimSpace(p.Name)
+	if !ValidPolicyName(p.Name) {
+		return fmt.Errorf("invalid policy name: must be 1-64 chars, letters/digits/space/_/- only (start alphanumeric)")
+	}
 	if !validMode(p.Mode) {
 		return fmt.Errorf("invalid mode %q", p.Mode)
 	}
 	_, err := s.db.Exec(`
 		UPDATE policies SET name=?, mode=?, description=? WHERE id=?
 	`, p.Name, p.Mode, p.Description, id)
-	return err
+	if err != nil {
+		return fmt.Errorf("update policy %d: %w", id, err)
+	}
+	return nil
 }
 
 func (s *PolicyService) Delete(id int64) error {

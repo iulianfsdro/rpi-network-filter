@@ -53,6 +53,29 @@
         <button @click="changePassword()">Change Password</button>
     </article>
 
+    <!-- TLS / HTTPS -->
+    <article>
+        <header><h5 style="margin:0;">HTTPS Certificate</h5></header>
+        <p style="margin:0 0 0.5rem 0; color:var(--text-muted); font-size:0.85rem;">
+            Install netfilterd's self-signed cert as a trusted root on each
+            device to get green-lock HTTPS. After install, the browser stops
+            warning about the connection.
+        </p>
+        <div style="display:flex; gap:0.5rem; flex-wrap:wrap;">
+            <a href="/netfilter-ca.crt" download="netfilter-ca.crt" role="button" class="outline">Download CA cert</a>
+        </div>
+        <details style="margin-top:0.75rem;">
+            <summary>How to install</summary>
+            <ul style="font-size:0.85rem; color:var(--text-muted);">
+                <li><strong>iOS / iPadOS</strong>: open in Safari → install profile → Settings → General → VPN &amp; Device Management → install + trust → About → Certificate Trust Settings → enable for this cert.</li>
+                <li><strong>macOS</strong>: double-click → Keychain Access → right-click cert → Get Info → Trust → Always Trust.</li>
+                <li><strong>Windows</strong>: double-click → Install Certificate → Local Machine → "Trusted Root Certification Authorities".</li>
+                <li><strong>Android</strong>: Settings → Security → Encryption &amp; credentials → Install a certificate → CA certificate.</li>
+                <li><strong>Chrome on Linux</strong>: chrome://settings/certificates → Authorities → Import.</li>
+            </ul>
+        </details>
+    </article>
+
     <!-- System Actions -->
     <article>
         <header><h5 style="margin:0;">System</h5></header>

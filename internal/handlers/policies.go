@@ -191,14 +191,17 @@ func (h *PoliciesHandler) CreateDomain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.audit.Log("policy.domain.create", d.Domain)
+	// Resolve BEFORE Apply so Apply can embed the just-resolved IPs into
+	// the per-policy nft set via the pre-populated `elements = {...}`
+	// block. If we fired this async (as v2's first cut did), the first
+	// Apply would regenerate an empty set and the user would still see
+	// a connect drop for any client that had the IP cached from before
+	// the allow. Synchronous here costs ~100ms; worth it.
+	h.policy.ResolveDomain(d.Domain)
 	if err := h.firewall.Apply(); err != nil {
 		JSONError(w, http.StatusInternalServerError, "saved but failed to apply: "+err.Error())
 		return
 	}
-	// Fire a DNS query through the local dnsmasq so the nft set populates
-	// before the first client tries to connect. Background to keep the
-	// HTTP response fast — worst case, the client's own query beats ours.
-	go h.policy.ResolveDomain(d.Domain)
 	JSON(w, http.StatusCreated, map[string]any{"id": id})
 }
 

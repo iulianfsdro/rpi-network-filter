@@ -75,11 +75,12 @@ func (h *FirewallHandler) CreateAllowedDomain(w http.ResponseWriter, r *http.Req
 	}
 
 	h.audit.Log("allowlist.create", d.Domain)
+	// Resolve before Apply so the nft set is populated immediately.
+	h.policy.ResolveDomain(d.Domain)
 	if err := h.firewall.Apply(); err != nil {
 		JSONError(w, http.StatusInternalServerError, "saved but failed to apply: "+err.Error())
 		return
 	}
-	go h.policy.ResolveDomain(d.Domain)
 	JSON(w, http.StatusCreated, map[string]any{"id": id})
 }
 

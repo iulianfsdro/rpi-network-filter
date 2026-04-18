@@ -20,12 +20,17 @@ func NewBlockedService(db *sql.DB) *BlockedService {
 	return &BlockedService{db: db}
 }
 
-// NormalizeDomain lowercases, trims whitespace, and strips a leading "*."
-// wildcard — "*.tesla.com" becomes "tesla.com". Matching is suffix-based
-// by default so the root form matches subdomains too.
+// NormalizeDomain lowercases, trims whitespace, strips a leading "*."
+// wildcard, then rejects anything that doesn't match a strict hostname
+// shape (no slashes, no whitespace, no control chars — those would be
+// direct injection vectors into dnsmasq's address=/.../ directives).
+// Returns "" for invalid input; callers treat "" as "reject".
 func NormalizeDomain(d string) string {
 	d = strings.ToLower(strings.TrimSpace(d))
 	d = strings.TrimPrefix(d, "*.")
+	if !ValidDomain(d) {
+		return ""
+	}
 	return d
 }
 

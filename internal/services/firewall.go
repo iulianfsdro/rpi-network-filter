@@ -293,18 +293,31 @@ func (s *FirewallService) Apply() error {
 		return fmt.Errorf("list rules for apply: %w", err)
 	}
 
-	// Blocked devices (hard drop, regardless of policy)
+	// Blocked devices (hard drop, regardless of policy). Scan errors
+	// are fatal — silently dropping a blocked MAC from the ruleset
+	// would let a blocked device through.
 	var blockedMACs []string
 	rows, err := s.db.Query("SELECT mac_address FROM devices WHERE is_blocked = 1")
 	if err != nil {
 		return fmt.Errorf("query blocked devices: %w", err)
 	}
-	defer rows.Close()
 	for rows.Next() {
 		var mac string
-		rows.Scan(&mac)
+		if err := rows.Scan(&mac); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan blocked device: %w", err)
+		}
+		if !ValidMAC(mac) {
+			log.Printf("[FIREWALL] skip invalid blocked MAC %q in DB", mac)
+			continue
+		}
 		blockedMACs = append(blockedMACs, mac)
 	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("iterate blocked devices: %w", err)
+	}
+	rows.Close()
 
 	snap, err := s.loadPolicySnapshot()
 	if err != nil {
@@ -421,8 +434,8 @@ func (s *FirewallService) generateConfig(rules []models.FirewallRule, blockedMAC
 			}
 			for _, ip := range rs {
 				ip = strings.TrimSpace(ip)
-				if ip == "" || strings.Contains(ip, ":") {
-					continue // skip IPv6; nft set is ipv4_addr
+				if !ValidIPv4(ip) {
+					continue
 				}
 				if _, dup := seen[ip]; dup {
 					continue
@@ -438,7 +451,10 @@ func (s *FirewallService) generateConfig(rules []models.FirewallRule, blockedMAC
 				if i == len(ips)-1 {
 					comma = ""
 				}
-				fmt.Fprintf(&b, "            %s%s\n", ip, comma)
+				// Explicit per-element timeout — older nft versions
+				// reject anonymous elements in a set with flags=timeout
+				// unless each element carries its own timeout.
+				fmt.Fprintf(&b, "            %s timeout 30d%s\n", ip, comma)
 			}
 			b.WriteString("        }\n")
 		}
@@ -508,9 +524,11 @@ func (s *FirewallService) generateConfig(rules []models.FirewallRule, blockedMAC
 					fmt.Fprintf(&b, "        %s\n", line)
 				}
 			}
-			fmt.Fprintf(&b, "        ct state new log prefix \"[NETFILTER-DROP pol=%s] \"\n", p.Name)
+			fmt.Fprintf(&b, "        ct state new log prefix \"[NETFILTER-DROP pol=%s] \" drop\n", p.Name)
+			b.WriteString("        drop\n")
 		case p.Mode == "strict":
-			fmt.Fprintf(&b, "        ct state new log prefix \"[NETFILTER-DROP pol=%s] \"\n", p.Name)
+			fmt.Fprintf(&b, "        ct state new log prefix \"[NETFILTER-DROP pol=%s] \" drop\n", p.Name)
+			b.WriteString("        drop\n")
 		default:
 			// permissive non-default — fall through to default chain
 			fmt.Fprintf(&b, "        jump %s\n", policyChainName(snap.defaultID))
@@ -569,7 +587,28 @@ func (s *FirewallService) generateConfig(rules []models.FirewallRule, blockedMAC
 // buildRuleLines returns one or more nftables rule lines for a single rule.
 // If dest_ip is a hostname, it resolves to all IPs and emits one rule per IP.
 // If resolution fails, the rule is skipped with a warning.
+//
+// Validates every field before emitting — the output is pasted into the
+// nft config file, so any unvalidated string with `\n`, `;`, or `{` would
+// inject arbitrary rules.
 func (s *FirewallService) buildRuleLines(r models.FirewallRule) []string {
+	if !ValidProtocol(r.Protocol) {
+		log.Printf("[FIREWALL] skip rule %d: invalid protocol %q", r.ID, r.Protocol)
+		return nil
+	}
+	if r.SourceIP != "" && !ValidIPOrCIDR(r.SourceIP) {
+		log.Printf("[FIREWALL] skip rule %d: invalid source_ip %q", r.ID, r.SourceIP)
+		return nil
+	}
+	if !ValidPortSpec(r.DestPort) {
+		log.Printf("[FIREWALL] skip rule %d: invalid dest_port %q", r.ID, r.DestPort)
+		return nil
+	}
+	if r.DeviceMAC != "" && !ValidMAC(r.DeviceMAC) {
+		log.Printf("[FIREWALL] skip rule %d: invalid device_mac %q", r.ID, r.DeviceMAC)
+		return nil
+	}
+
 	destIPs := []string{""}
 
 	if r.DestIP != "" {
@@ -578,7 +617,19 @@ func (s *FirewallService) buildRuleLines(r models.FirewallRule) []string {
 			log.Printf("[FIREWALL] Skipping rule %d: could not resolve dest_ip %q", r.ID, r.DestIP)
 			return nil
 		}
-		destIPs = resolved
+		// Validate every resolved IP — LookupIP should never return
+		// malformed strings, but defensive validation keeps the nft
+		// config uninjectable even if resolution is poisoned.
+		var filtered []string
+		for _, ip := range resolved {
+			if ValidIPOrCIDR(ip) {
+				filtered = append(filtered, ip)
+			}
+		}
+		if len(filtered) == 0 {
+			return nil
+		}
+		destIPs = filtered
 	}
 
 	var lines []string
