@@ -98,13 +98,16 @@ systemctl unmask hostapd 2>/dev/null || true
 
 # --- NetworkManager: leave wlan0 alone ---------------------------------------
 
-info "Excluding wlan0 from NetworkManager..."
+info "Excluding wlan0 from NetworkManager (persists across reboots)..."
 mkdir -p /etc/NetworkManager/conf.d
 cat > /etc/NetworkManager/conf.d/99-netfilter-unmanaged.conf << 'NMCONF'
 [keyfile]
 unmanaged-devices=interface-name:wlan0
 NMCONF
-systemctl reload NetworkManager 2>/dev/null || systemctl restart NetworkManager || true
+# Intentionally NOT reloading NetworkManager here — a reload/restart would
+# drop any SSH session coming in over wlan0 (the home-WiFi client link).
+# The drop-in is applied on the next boot; for the current boot, nf-wlan0's
+# ExecStartPre issues `nmcli device set wlan0 managed no` at runtime.
 
 # --- systemd-resolved: free port 53 ------------------------------------------
 
@@ -234,31 +237,38 @@ info "Unblocking WiFi radio..."
 rfkill unblock wifi || true
 iw reg set "$COUNTRY_CODE" || true
 
-# --- Enable and start --------------------------------------------------------
+# --- Enable services (without starting yet) ----------------------------------
 
-info "Enabling and starting services..."
-systemctl enable nf-wlan0 nftables hostapd dnsmasq netfilterd
+info "Enabling services..."
+systemctl enable nf-wlan0 nftables hostapd dnsmasq netfilterd >/dev/null
+
+# --- Detached bring-up -------------------------------------------------------
+#
+# Starting nf-wlan0 + hostapd takes wlan0 out of client mode, which kills any
+# SSH session coming in over the home-WiFi link. We detach the final cascade
+# via nohup so the Pi finishes on its own after the SSH connection drops.
+
+BRINGUP_LOG=/var/log/netfilter-bringup.log
+cat > /tmp/netfilter-bringup.sh << 'BRINGUP'
+#!/bin/bash
+set +e
+echo "=== bringup $(date -Iseconds) ==="
+systemctl restart nftables
 systemctl start nf-wlan0
-systemctl start nftables
 systemctl start hostapd
 systemctl start dnsmasq
 systemctl start netfilterd
-
-# --- Status summary ----------------------------------------------------------
-
-echo ""
-echo "------------------------------------------------"
-echo "  Service status"
-echo "------------------------------------------------"
+sleep 3
 for unit in nf-wlan0 nftables hostapd dnsmasq netfilterd; do
-    state=$(systemctl is-active "$unit" 2>/dev/null || echo "inactive")
-    printf "  %-12s %s\n" "$unit" "$state"
+    printf "  %-12s %s\n" "$unit" "$(systemctl is-active "$unit")"
 done
-echo "  wlan0 addr:  $(ip -4 -o addr show wlan0 2>/dev/null | awk '{print $4}' || echo 'none')"
+ip -4 -o addr show wlan0
+BRINGUP
+chmod +x /tmp/netfilter-bringup.sh
 
 echo ""
 echo "================================================"
-echo "  Setup Complete!"
+echo "  Ready to bring up the hotspot"
 echo "================================================"
 echo ""
 echo "  Hotspot SSID:  ${AP_SSID}"
@@ -267,10 +277,20 @@ echo "  Web UI:        https://192.168.4.1:8443"
 echo "  Admin user:    admin"
 echo ""
 echo "  WAN interface: ${WAN_IFACE}"
-echo "  LAN interface: wlan0 (hotspot, 192.168.4.1/24)"
+echo "  LAN interface: wlan0 → 192.168.4.1/24 (hotspot)"
 echo ""
-echo "  Default policy: ALL client traffic BLOCKED"
-echo "  Add accept rules via the web UI to allow traffic."
+echo "  Heads-up: the final step will take wlan0 into AP mode."
+echo "  If you're SSHed in over wlan0, your session will drop."
+echo "  The bring-up runs detached and continues on its own."
 echo ""
-echo "  Troubleshoot: sudo journalctl -u hostapd -u dnsmasq -u netfilterd -e"
+echo "  Bring-up log:  ${BRINGUP_LOG}"
+echo "  After it settles, connect a device to the '${AP_SSID}' SSID"
+echo "  and open https://192.168.4.1:8443"
+echo ""
 echo "================================================"
+
+info "Detaching final bring-up... (SSH may drop in a few seconds)"
+nohup /tmp/netfilter-bringup.sh > "$BRINGUP_LOG" 2>&1 < /dev/null &
+disown || true
+sleep 1
+exit 0
