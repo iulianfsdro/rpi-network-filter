@@ -31,6 +31,10 @@ error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
 [[ $EUID -ne 0 ]] && error "Run as root: sudo $0 <hostname> <duckdns-token>"
 [[ $# -eq 2 ]] || error "Usage: $0 <hostname.duckdns.org> <duckdns-token>"
 
+# acme.sh refuses to run under `sudo` — it inspects SUDO_COMMAND.
+# We're already root, so strip the vars that make it bail.
+unset SUDO_COMMAND SUDO_USER SUDO_UID SUDO_GID
+
 HOSTNAME="$1"
 DUCKDNS_TOKEN="$2"
 CERT_DIR=/etc/netfilterd
@@ -47,10 +51,15 @@ fi
 # the public DNS name to whatever public IP they happen to see, but that's
 # harmless — we override locally.) If you'd rather not advertise the LAN
 # IP on public DNS, skip this update.
-info "Updating DuckDNS A record to $PI_LAN_IP (for archival only; we override via dnsmasq)"
-curl -fsS "https://www.duckdns.org/update?domains=${HOSTNAME%%.duckdns.org}&token=${DUCKDNS_TOKEN}&ip=${PI_LAN_IP}" \
-    -o /tmp/duckdns.out || warn "DuckDNS update failed — continuing anyway"
-cat /tmp/duckdns.out; echo
+info "Updating DuckDNS A record to $PI_LAN_IP (sanity-check that token + subdomain are valid)"
+DUCKDNS_RESULT=$(curl -fsS "https://www.duckdns.org/update?domains=${HOSTNAME%%.duckdns.org}&token=${DUCKDNS_TOKEN}&ip=${PI_LAN_IP}" || echo "KO")
+echo "  DuckDNS response: $DUCKDNS_RESULT"
+if [[ "$DUCKDNS_RESULT" != "OK" ]]; then
+    error "DuckDNS returned \"$DUCKDNS_RESULT\". Check that:
+      1. You created the subdomain ${HOSTNAME%%.duckdns.org} in your DuckDNS dashboard
+      2. The token matches the one shown at the top of https://www.duckdns.org
+    Cert issuance uses the same API, so it will also fail until DuckDNS returns OK here."
+fi
 
 # --- Install acme.sh (pure-shell ACME client, no Python or Go deps) -----
 
