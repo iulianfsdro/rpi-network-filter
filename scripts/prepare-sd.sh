@@ -62,15 +62,41 @@ echo "  - country code:   US"
 echo "  - admin UI pass:  netfilter"
 echo "  Edit $PAYLOAD/answers.txt to override."
 
-# Hook into Imager's firstrun.sh so our provisioning service gets installed
-# during the same first-boot that creates the user.
+# Hook into Imager's first-boot customization so our provisioning service
+# gets installed during the same first-boot that creates the user. Recent
+# Imager versions use cloud-init (user-data); older versions used firstrun.sh.
+USER_DATA="$BOOT/user-data"
 FIRSTRUN="$BOOT/firstrun.sh"
-if [[ -f "$FIRSTRUN" ]]; then
+
+if [[ -f "$USER_DATA" ]]; then
+    echo "Injecting provisioning hook into $USER_DATA (cloud-init)"
+    python - "$USER_DATA" <<'PY'
+import sys, pathlib
+p = pathlib.Path(sys.argv[1])
+src = p.read_text()
+if "netfilter-provision" in src:
+    print("  already hooked; skipping")
+    sys.exit(0)
+hook = (
+    "  - install -m 0755 /boot/firmware/netfilter/deploy/provision.sh /usr/local/sbin/netfilter-provision.sh\n"
+    "  - install -m 0644 /boot/firmware/netfilter/deploy/netfilter-provision.service /etc/systemd/system/netfilter-provision.service\n"
+    "  - systemctl enable netfilter-provision.service\n"
+)
+if "\nruncmd:\n" in src:
+    src = src.replace("\nruncmd:\n", "\nruncmd:\n" + hook, 1)
+elif src.startswith("runcmd:\n"):
+    src = "runcmd:\n" + hook + src[len("runcmd:\n"):]
+else:
+    if not src.endswith("\n"):
+        src += "\n"
+    src += "runcmd:\n" + hook
+p.write_text(src)
+PY
+elif [[ -f "$FIRSTRUN" ]]; then
     if grep -q "netfilter-provision" "$FIRSTRUN"; then
         echo "firstrun.sh already hooked; skipping injection."
     else
         echo "Injecting provisioning hook into $FIRSTRUN"
-        # Insert three install/enable lines immediately before the final `exit 0`.
         python - "$FIRSTRUN" <<'PY'
 import sys, pathlib
 p = pathlib.Path(sys.argv[1])
@@ -90,11 +116,12 @@ PY
     fi
 else
     cat <<'WARN'
-WARNING: no firstrun.sh found on bootfs.
+WARNING: no user-data or firstrun.sh found on bootfs.
 
-You almost certainly skipped Raspberry Pi Imager's "Advanced Settings" step
-(gear icon). Without it, the Pi has no user configured and SSH is disabled —
-you will not be able to log in. Re-flash using Advanced Settings.
+You almost certainly skipped Raspberry Pi Imager's customization step
+(gear icon in the final screen). Without it, the Pi has no user configured
+and SSH is disabled — you will not be able to log in. Re-flash using the
+Advanced / OS Customisation settings.
 WARN
     exit 2
 fi
