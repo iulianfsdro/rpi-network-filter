@@ -211,6 +211,16 @@ var migrations = []string{
 	FROM policies WHERE name='Tesla';
 
 	DROP TABLE allowed_domains;`,
+
+	// v7: traffic monitor split — tag each query_log row with the source
+	// stream (dns|forward) and, for forward rows, the policy name that
+	// produced the verdict. The UI reads `source` to split DNS events
+	// from firewall events into separate tabs so users stop confusing
+	// dnsmasq query logs with actual packet drops/accepts.
+	`ALTER TABLE query_log ADD COLUMN source TEXT DEFAULT 'forward';
+	ALTER TABLE query_log ADD COLUMN policy TEXT DEFAULT '';
+	UPDATE query_log SET source='dns' WHERE action='query';
+	CREATE INDEX IF NOT EXISTS idx_query_log_source ON query_log(source);`,
 }
 
 func Migrate(db *sql.DB) error {

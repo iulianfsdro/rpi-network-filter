@@ -23,6 +23,8 @@ type TrafficEntry struct {
 	Action    string `json:"action"`
 	SrcMAC    string `json:"src_mac"`
 	Domain    string `json:"domain"`
+	Source    string `json:"source"` // "dns" | "forward"
+	Policy    string `json:"policy"` // name of the policy that produced the verdict (forward only)
 }
 
 type TrafficLogService struct {
@@ -43,6 +45,8 @@ var nflogRe = regexp.MustCompile(
 )
 var nflogPortRe = regexp.MustCompile(`DPT=(\d+)`)
 var nflogMacRe = regexp.MustCompile(`MAC=([0-9a-f:]+)`)
+// Captures the policy name from log prefixes like "[NETFILTER-ACCEPT pol=Tesla]".
+var nflogPolicyRe = regexp.MustCompile(`\[NETFILTER-(?:ACCEPT|DROP)(?:-[A-Z]+)?\s+pol=([^\s\]]+)\]`)
 
 var dnsQueryRe = regexp.MustCompile(
 	`query\[(\S+)\] (\S+) from (\S+)`,
@@ -217,6 +221,7 @@ func (s *TrafficLogService) parseNfLine(message, realtimeTS string) {
 		SrcIP:     m[1],
 		DstIP:     m[2],
 		Protocol:  m[3],
+		Source:    "forward",
 	}
 
 	if pm := nflogPortRe.FindStringSubmatch(message); pm != nil {
@@ -226,15 +231,27 @@ func (s *TrafficLogService) parseNfLine(message, realtimeTS string) {
 		entry.SrcMAC = mm[1]
 	}
 
-	if strings.Contains(message, "[NETFILTER-DROP]") {
+	switch {
+	case strings.Contains(message, "[NETFILTER-DROP-DOH]"):
 		entry.Action = "blocked"
-	} else if strings.Contains(message, "[NETFILTER-ACCEPT]") {
+		entry.Policy = "DoH chokepoint"
+	case strings.Contains(message, "[NETFILTER-DROP-DOT]"):
+		entry.Action = "blocked"
+		entry.Policy = "DoT chokepoint"
+	case strings.Contains(message, "[NETFILTER-DROP"):
+		entry.Action = "blocked"
+	case strings.Contains(message, "[NETFILTER-ACCEPT"):
 		entry.Action = "allowed"
-	} else {
+	default:
 		entry.Action = "logged"
 	}
 
-	// Resolve domain from DNS cache
+	if entry.Policy == "" {
+		if pm := nflogPolicyRe.FindStringSubmatch(message); pm != nil {
+			entry.Policy = pm[1]
+		}
+	}
+
 	s.dnsMu.RLock()
 	if domain, ok := s.dnsCache[entry.DstIP]; ok {
 		entry.Domain = domain
@@ -261,6 +278,7 @@ func (s *TrafficLogService) parseDnsLine(message, realtimeTS string) {
 			SrcIP:     clientIP,
 			Domain:    domain,
 			Action:    "query",
+			Source:    "dns",
 		})
 		return
 	}
@@ -277,10 +295,13 @@ func (s *TrafficLogService) parseDnsLine(message, realtimeTS string) {
 }
 
 func (s *TrafficLogService) insertEntry(e TrafficEntry) {
+	if e.Source == "" {
+		e.Source = "forward"
+	}
 	_, err := s.db.Exec(`
-		INSERT INTO query_log (timestamp, client_ip, domain, dst_ip, dst_port, protocol, action, client_mac)
-		VALUES (CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?)
-	`, e.SrcIP, e.Domain, e.DstIP, e.DstPort, e.Protocol, e.Action, e.SrcMAC)
+		INSERT INTO query_log (timestamp, client_ip, domain, dst_ip, dst_port, protocol, action, client_mac, source, policy)
+		VALUES (CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, e.SrcIP, e.Domain, e.DstIP, e.DstPort, e.Protocol, e.Action, e.SrcMAC, e.Source, e.Policy)
 	if err != nil {
 		log.Printf("[WARN] Failed to insert query log: %v", err)
 	}
@@ -292,7 +313,8 @@ func (s *TrafficLogService) RecentEntries(limit int) []TrafficEntry {
 	}
 
 	rows, err := s.db.Query(`
-		SELECT id, timestamp, client_ip, domain, dst_ip, dst_port, protocol, action, client_mac
+		SELECT id, timestamp, client_ip, domain, dst_ip, dst_port, protocol, action, client_mac,
+		       COALESCE(source,'forward'), COALESCE(policy,'')
 		FROM query_log ORDER BY id DESC LIMIT ?
 	`, limit)
 	if err != nil {
@@ -303,7 +325,8 @@ func (s *TrafficLogService) RecentEntries(limit int) []TrafficEntry {
 	var entries []TrafficEntry
 	for rows.Next() {
 		var e TrafficEntry
-		rows.Scan(&e.ID, &e.Timestamp, &e.SrcIP, &e.Domain, &e.DstIP, &e.DstPort, &e.Protocol, &e.Action, &e.SrcMAC)
+		rows.Scan(&e.ID, &e.Timestamp, &e.SrcIP, &e.Domain, &e.DstIP, &e.DstPort,
+			&e.Protocol, &e.Action, &e.SrcMAC, &e.Source, &e.Policy)
 		entries = append(entries, e)
 	}
 	return entries
@@ -326,6 +349,7 @@ type TrafficFilter struct {
 	Query   string
 	From    string // ISO datetime
 	To      string // ISO datetime
+	Source  string // "dns" | "forward" | "" (any)
 }
 
 // QueryPaginated returns a page of query_log entries matching the filter.
@@ -343,6 +367,11 @@ func (s *TrafficLogService) QueryPaginated(f TrafficFilter) PagedResult {
 	if f.Action != "" && f.Action != "all" {
 		where = append(where, "action = ?")
 		args = append(args, f.Action)
+	}
+
+	if f.Source != "" && f.Source != "all" {
+		where = append(where, "COALESCE(source,'forward') = ?")
+		args = append(args, f.Source)
 	}
 
 	if f.Query != "" {
@@ -382,7 +411,8 @@ func (s *TrafficLogService) QueryPaginated(f TrafficFilter) PagedResult {
 	offset := (f.Page - 1) * f.PerPage
 
 	query := `
-		SELECT id, timestamp, client_ip, domain, dst_ip, dst_port, protocol, action, client_mac
+		SELECT id, timestamp, client_ip, domain, dst_ip, dst_port, protocol, action, client_mac,
+		       COALESCE(source,'forward'), COALESCE(policy,'')
 		FROM query_log` + whereSQL + ` ORDER BY id DESC LIMIT ? OFFSET ?`
 	pageArgs := append(args, f.PerPage, offset)
 
@@ -396,7 +426,8 @@ func (s *TrafficLogService) QueryPaginated(f TrafficFilter) PagedResult {
 	entries := make([]TrafficEntry, 0, f.PerPage)
 	for rows.Next() {
 		var e TrafficEntry
-		rows.Scan(&e.ID, &e.Timestamp, &e.SrcIP, &e.Domain, &e.DstIP, &e.DstPort, &e.Protocol, &e.Action, &e.SrcMAC)
+		rows.Scan(&e.ID, &e.Timestamp, &e.SrcIP, &e.Domain, &e.DstIP, &e.DstPort,
+			&e.Protocol, &e.Action, &e.SrcMAC, &e.Source, &e.Policy)
 		entries = append(entries, e)
 	}
 

@@ -50,6 +50,7 @@ func (h *SystemHandler) TrafficLog(w http.ResponseWriter, r *http.Request) {
 		Query:   q.Get("q"),
 		From:    q.Get("from"),
 		To:      q.Get("to"),
+		Source:  q.Get("source"),
 	}
 
 	result := h.trafficLog.QueryPaginated(filter)
