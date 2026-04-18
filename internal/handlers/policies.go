@@ -4,13 +4,34 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/url"
+	"regexp"
 	"strconv"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 
 	"github.com/iulianfsdro/rpi-network-filter/internal/models"
 	"github.com/iulianfsdro/rpi-network-filter/internal/services"
 )
+
+var macRe = regexp.MustCompile(`^[0-9a-f]{2}(:[0-9a-f]{2}){5}$`)
+
+// extractMAC URL-decodes the {mac} path param (chi does not decode path
+// parameters), lowercases it, and validates the aa:bb:cc:dd:ee:ff shape.
+// Returns the normalized MAC or an error suitable to hand back as 400.
+func extractMAC(r *http.Request) (string, error) {
+	raw := chi.URLParam(r, "mac")
+	decoded, err := url.PathUnescape(raw)
+	if err != nil {
+		return "", errors.New("invalid mac encoding")
+	}
+	mac := strings.ToLower(strings.TrimSpace(decoded))
+	if !macRe.MatchString(mac) {
+		return "", errors.New("invalid mac format (want aa:bb:cc:dd:ee:ff)")
+	}
+	return mac, nil
+}
 
 type PoliciesHandler struct {
 	policy   *services.PolicyService
@@ -241,7 +262,11 @@ type assignRequest struct {
 }
 
 func (h *PoliciesHandler) AssignDevice(w http.ResponseWriter, r *http.Request) {
-	mac := chi.URLParam(r, "mac")
+	mac, err := extractMAC(r)
+	if err != nil {
+		JSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	var req assignRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		JSONError(w, http.StatusBadRequest, "invalid request body")
@@ -260,7 +285,11 @@ func (h *PoliciesHandler) AssignDevice(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *PoliciesHandler) UnassignDevice(w http.ResponseWriter, r *http.Request) {
-	mac := chi.URLParam(r, "mac")
+	mac, err := extractMAC(r)
+	if err != nil {
+		JSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	if err := h.policy.UnassignDevice(mac); err != nil {
 		JSONError(w, http.StatusInternalServerError, err.Error())
 		return

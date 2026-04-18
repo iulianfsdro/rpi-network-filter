@@ -221,6 +221,13 @@ var migrations = []string{
 	ALTER TABLE query_log ADD COLUMN policy TEXT DEFAULT '';
 	UPDATE query_log SET source='dns' WHERE action='query';
 	CREATE INDEX IF NOT EXISTS idx_query_log_source ON query_log(source);`,
+
+	// v8: wipe device_policies rows with URL-encoded MACs that a
+	// prior handler bug (no PathUnescape on the {mac} path param)
+	// inserted as literal "aa%3abb%3a..." strings. Those strings
+	// ended up verbatim in the generated nftables ruleset and broke
+	// the Apply() call with "unexpected string, expecting colon".
+	`DELETE FROM device_policies WHERE instr(device_mac, '%') > 0;`,
 }
 
 func Migrate(db *sql.DB) error {
