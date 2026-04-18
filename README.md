@@ -43,47 +43,82 @@ The web UI runs on port 80 over the hotspot network:
 - USB LTE modem or any WAN interface on `eth1`
 - microSD card (8GB+)
 
-## Quick start
+## Quick start — zero-network first boot (recommended)
 
-### 1. Flash Raspberry Pi OS
+The Pi self-provisions on first power-on from the SD card alone. You never need
+ethernet or a separate WiFi link: plug in the LTE modem, power on, wait, join
+the `NetFilter` hotspot.
 
-Flash Debian 13 (Trixie) 64-bit to a microSD card. Enable SSH and set up a user (`pi`).
+### 1. Flash Raspberry Pi OS Lite (64-bit, Trixie)
+
+Use Raspberry Pi Imager. **Open Advanced Settings (gear icon):**
+- hostname: `netfilter`
+- set a user (e.g. `pi` + your password)
+- enable SSH (password or public key)
+- set locale / timezone
+- **leave wireless LAN UNCONFIGURED** — `wlan0` must be free for AP mode
 
 ### 2. Build the binary
-
-On your development machine (cross-compile for arm64):
 
 ```bash
 CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o netfilterd-arm64 ./cmd/netfilterd
 ```
 
-The binary is fully self-contained (~19MB) — no C toolchain or shared libraries needed on the Pi.
+### 3. Stuff the bootfs partition
 
-### 3. Run the setup script
+Re-insert the SD card so Windows mounts the `bootfs` partition (e.g. drive `E:`).
+From Git Bash in the repo root:
 
-Copy the binary and deploy directory to the Pi, then run the first-boot setup:
+```bash
+scripts/prepare-sd.sh /e          # adjust drive letter
+```
+
+This copies the binary and `deploy/` directory onto the SD card, writes default
+setup answers (`NetFilter` / `changeme123` / `US` / admin pass `netfilter` — edit
+`E:/netfilter/answers.txt` to override), and injects a provisioning hook into the
+Imager-generated `firstrun.sh`.
+
+### 4. Boot
+
+Eject the card, insert into the Pi, plug in the USB LTE modem, power on. First
+boot runs in ~3–5 minutes: `netfilter-provision.service` installs packages,
+writes configs, brings up `hostapd`/`dnsmasq`/`nftables`/`netfilterd`, then
+self-disables.
+
+### 5. Connect
+
+1. Join the `NetFilter` SSID (default password `changeme123`).
+2. Open <https://192.168.4.1:8443> (accept the self-signed cert).
+3. Log in as `admin` / `netfilter` (change immediately in the UI).
+
+### Troubleshooting
+
+```bash
+# After the Pi boots, log in with the user you set in Imager
+sudo cat /var/log/netfilter-provision.log      # first-boot output
+sudo cat /tmp/setup.log                         # setup.sh output
+sudo cat /var/log/netfilter-bringup.log         # final service bring-up
+sudo systemctl is-active hostapd dnsmasq nftables netfilterd nf-wlan0
+```
+
+---
+
+## Manual install (existing Pi)
+
+Already have a running Pi you want to convert? SSH in and run the setup script
+against the repo's `deploy/` directory:
 
 ```bash
 scp netfilterd-arm64 pi@<pi-ip>:/tmp/netfilterd
-scp -r deploy/* pi@<pi-ip>:/tmp/deploy/
-
-ssh pi@<pi-ip>
-sudo bash /tmp/deploy/setup.sh
+scp -r deploy/*      pi@<pi-ip>:/tmp/deploy/
+ssh -t pi@<pi-ip> "sudo bash /tmp/deploy/setup.sh"
 ```
 
-The setup script will:
-- Install required packages (hostapd, dnsmasq, nftables, etc.)
-- Configure the WiFi hotspot (prompts for SSID and password)
-- Set up NAT routing and the default-deny firewall
-- Install the binary and systemd service
-- Create the admin user (prompts for password)
-- Reboot into a fully working appliance
-
-### 4. Connect and manage
-
-1. Connect to the WiFi hotspot (default: `NetFilter`)
-2. Open `http://192.168.4.1` in your browser
-3. Log in with your admin credentials
+`setup.sh` prompts for SSID, hotspot password, country code, and admin password.
+Packages, configs, binary, TLS cert, and the systemd unit are installed in one
+pass. The final service bring-up is detached via `nohup` so an SSH-over-`wlan0`
+session that gets dropped when `hostapd` seizes the radio does not strand the
+provisioning mid-run.
 
 ## Architecture
 

@@ -1,0 +1,16 @@
+[Unit]
+Description=NetFilter first-boot provisioning
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=!/var/lib/netfilter-provisioned
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/netfilter-provision.sh
+StandardOutput=append:/var/log/netfilter-provision.log
+StandardError=append:/var/log/netfilter-provision.log
+TimeoutStartSec=900
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
