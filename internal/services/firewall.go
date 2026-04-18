@@ -406,6 +406,23 @@ func (s *FirewallService) generateConfig(rules []models.FirewallRule, blockedMAC
 		b.WriteString("    }\n\n")
 	}
 
+	// Well-known DoH/DoT resolver IPs. Permanent (no timeout) because the
+	// list is static and small. Dropping these forces clients back onto
+	// our dnsmasq — without this chokepoint, Firefox/iOS/Chrome silently
+	// bypass every per-policy allow rule via encrypted DNS.
+	b.WriteString("    set doh_resolvers {\n")
+	b.WriteString("        type ipv4_addr\n")
+	b.WriteString("        elements = {\n")
+	for i, ip := range dohResolverIPs {
+		comma := ","
+		if i == len(dohResolverIPs)-1 {
+			comma = ""
+		}
+		fmt.Fprintf(&b, "            %s%s\n", ip, comma)
+	}
+	b.WriteString("        }\n")
+	b.WriteString("    }\n\n")
+
 	// Input chain (unchanged)
 	b.WriteString("    chain input {\n")
 	b.WriteString("        type filter hook input priority filter; policy drop;\n")
@@ -455,14 +472,20 @@ func (s *FirewallService) generateConfig(rules []models.FirewallRule, blockedMAC
 	}
 
 	// Top-level forward chain: conntrack fast-path, hard drops for blocked
-	// devices, per-MAC policy dispatch via vmap (goto — no return), then
-	// fallback jump into the default chain for unassigned devices.
+	// devices, DoH/DoT chokepoint, per-MAC policy dispatch via vmap
+	// (goto — no return), then fallback jump into the default chain for
+	// unassigned devices.
 	b.WriteString("    chain forward {\n")
 	b.WriteString("        type filter hook forward priority filter; policy drop;\n")
 	b.WriteString("        ct state established,related accept\n")
 	for _, mac := range blockedMACs {
 		fmt.Fprintf(&b, "        ether saddr %s drop\n", strings.ToLower(mac))
 	}
+	// DoH / DoT chokepoint — applies to every device, regardless of policy,
+	// before the per-MAC dispatch. Logged so the traffic monitor can show
+	// which devices are trying to bypass our DNS.
+	b.WriteString("        ip daddr @doh_resolvers tcp dport 443 log prefix \"[NETFILTER-DROP-DOH] \" drop\n")
+	b.WriteString("        ip daddr @doh_resolvers udp dport 853 log prefix \"[NETFILTER-DROP-DOT] \" drop\n")
 	if len(snap.assignments) > 0 {
 		b.WriteString("        ether saddr vmap {\n")
 		for i, a := range snap.assignments {
