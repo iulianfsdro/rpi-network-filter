@@ -39,63 +39,78 @@ user-visible failure modes that accumulated over testing:
 Each bullet = one commit. Each commit keeps the tree green (`go build`
 passes and the running daemon boots).
 
-### Foundation (complete — commit pending on `v2` branch)
+### Foundation — complete (`ae39cf3`)
 
 - [x] Schema v6 migration: `policies`, `policy_allowed_domains`,
-      `device_policies`. Data migration: existing `allowed_domains`
-      rows move into the `Default` policy; `Tesla` policy seeded with
-      `connman.vn.tesla.services`.
-- [x] `FirewallService` allow-list CRUD now operates on the `Default`
-      policy via `policy_allowed_domains`. Behavior unchanged for v1
-      API clients.
+      `device_policies`. Default policy ships **strict + empty** so
+      unassigned devices are blocked by default. Existing
+      `allowed_domains` rows intentionally not migrated. Tesla policy
+      seeded strict with `connman.vn.tesla.services`.
+- [x] `FirewallService` allow-list CRUD rewired onto
+      `policy_allowed_domains` via the Default policy.
 
-### Per-policy runtime (next)
+### Per-policy runtime — complete (`3e3a683`)
 
-- [ ] `PolicyService` — CRUD for policies, per-policy allow list,
-      device assignment.
-- [ ] `FirewallService.generateConfig` — one nftables set per policy
+- [x] `PolicyService` — CRUD for policies, per-policy allow list,
+      device assignment, default-policy lookup.
+- [x] `FirewallService.generateConfig` — one nftables set per policy
       (`pol_<id>_ips`), one chain per policy (`pol_<id>_chain`), a
-      top-level `forward` dispatch via `ether saddr vmap`.
-- [ ] `writeDnsmasqNftsets` — one `nftset=` line per
-      (domain × policy); the nft set name derived from policy id.
-- [ ] Default policy chain behavior matches v1 (accept any IP in its
+      top-level `forward` dispatch via `ether saddr vmap` using
+      `goto` (not `jump`), unassigned MACs fall through to the
+      default chain.
+- [x] `writeDnsmasqNftsets` — one `nftset=` line per
+      (domain × policy); set name derived from policy id.
+- [x] Default policy chain behavior matches v1 (accept any IP in its
       set, drop miss).
-- [ ] Strict policy chain: accept any IP in its set, drop miss — no
+- [x] Strict policy chain: accept any IP in its set, drop miss — no
       fallback jump to default.
 
-### Reliability (next+1)
+### Reliability — complete (`371c04a`)
 
-- [ ] Bump nftset timeout to 30d.
-- [ ] Periodic re-resolve cron (every 6h) that walks
-      `policy_allowed_domains` and issues DNS queries through
-      127.0.0.1 so dnsmasq re-populates the sets.
-- [ ] Synchronous resolve on allow-list create: block the HTTP
-      request until the first DNS query has pushed IPs into the set.
-- [ ] Synchronous flush on allow-list delete: remove matching IPs
-      from the set before returning 200.
-- [ ] Per-entry metadata — write `resolved_ips`, `last_resolved_at`,
-      `hit_count` as the cron runs.
+- [x] nftset timeout bumped to 30d.
+- [x] Periodic re-resolve cron every 6h via
+      `PolicyService.StartRefreshLoop`; walks every enabled
+      (policy × domain) row and re-queries the local dnsmasq.
+- [x] Synchronous resolve on allow-list create — handler fires
+      `go policy.ResolveDomain(domain)` after Apply.
+- [x] Synchronous flush on allow-list delete — the set definitions
+      in `generateConfig` now pre-populate `elements = { ... }` from
+      `policy_allowed_domains.resolved_ips`, so a `flush ruleset +
+      reload` loads the survivors only, atomically dropping the
+      deleted domain's IPs.
+- [x] Per-entry metadata — `resolved_ips`, `last_resolved_at` written
+      by `ResolveDomain`; `hit_count` column reserved for future use.
 
-### DoH/DoT chokepoint
+### DoH/DoT chokepoint — complete (`51433bb`)
 
-- [ ] Bundled resolver list in `internal/services/doh.go`
-      (IPs for `1.1.1.1`, `1.0.0.1`, `8.8.8.8`, `8.8.4.4`, `9.9.9.9`,
-      `149.112.112.112`, `94.140.14.14`, `94.140.15.15`, ...).
-- [ ] `doh_resolvers` set, permanent, populated once at startup.
-- [ ] Forward-chain drop rule on tcp/443 + udp/853 against that set
-      runs before any policy chain jumps.
+- [x] Bundled 14-IP resolver list in `internal/services/doh.go`
+      (Cloudflare, Google, Quad9, AdGuard, OpenDNS, CleanBrowsing,
+      ControlD).
+- [x] Permanent `doh_resolvers` set populated at Apply.
+- [x] Forward-chain drop rule on tcp/443 + udp/853 against that set,
+      placed before the per-MAC vmap dispatch. Tagged
+      `[NETFILTER-DROP-DOH]` / `[NETFILTER-DROP-DOT]` for the
+      traffic monitor.
 
-### API + UI
+### API + UI — complete (`371c04a`, `f5a744d`, `6ff7719`)
 
-- [ ] Handlers: `GET/POST/PUT/DELETE /api/policies`,
-      `GET/POST/DELETE /api/policies/:id/domains`,
-      `PUT /api/devices/:mac/policy`.
-- [ ] Traffic-monitor endpoint returns `source` (`dns` | `forward`)
-      so the UI can tab-split without server changes per render.
-- [ ] Policies page (list, create, edit mode, edit allow list).
-- [ ] Device rows gain a policy dropdown.
-- [ ] Allow-list row shows last-resolved IPs + hit count + retry
-      button.
+- [x] Handlers: `GET/POST/PUT/DELETE /api/policies`,
+      `GET/POST/DELETE /api/policies/{id}/domains`,
+      `PUT/DELETE /api/policies/domains/{domainID}`,
+      `PUT/DELETE /api/devices/{mac}/policy`,
+      `GET /api/policies/assignments`.
+- [x] Traffic-monitor entries now carry `source` (`dns` | `forward`)
+      and `policy` columns; schema v7 migration backfills existing
+      rows.
+- [x] Policies page — list policies, mode + default badges, expand
+      to edit allow list (with resolved_ips + last_resolved_at +
+      hit_count columns), device-assignment table with inline
+      create/delete.
+- [x] Device rows (Devices page) gain a policy dropdown that writes
+      `/api/devices/{mac}/policy` inline; "Default (inherited)"
+      means no explicit assignment.
+- [x] Traffic Monitor gains tabs: All / DNS queries / Firewall
+      decisions, wired to the `source=` query param.
 
 ## Data model (v6)
 
@@ -156,13 +171,18 @@ pinned to a policy; the distinction matters only for unmapped devices,
 which always fall back to Default. Strict mode's real value is
 conceptual: it signals to the operator "this list is complete.")
 
-## Ordering risks
+## Status
+
+v2 is feature-complete on the `v2` branch as of 2026-04-19. Branch
+ready for validation on the appliance and merge back to `master`
+after user sign-off.
+
+## Ordering risks (retained for review)
 
 - Dropping `allowed_domains` in the migration means v1 binaries no
   longer run against a v6 DB. Acceptable — v2 is a forward-only
   upgrade.
-- The `INSERT OR IGNORE` data-migration relies on the Default policy
-  existing before the copy; the migration script ordering is correct.
-- Adding per-MAC dispatch means the firewall re-apply now depends on
-  the `devices` and `device_policies` tables. `FirewallService.Apply`
-  will need to join these.
+- Adding per-MAC dispatch means `FirewallService.Apply` now depends
+  on `device_policies`; the `policySnapshot` struct loads everything
+  in one transactional sweep at the top of Apply to keep read
+  consistency.

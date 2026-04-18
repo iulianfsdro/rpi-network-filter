@@ -17,6 +17,7 @@
                 <th>Name</th>
                 <th>MAC Address</th>
                 <th>IP Address</th>
+                <th>Policy</th>
                 <th>Blocked</th>
                 <th>Actions</th>
             </tr>
@@ -35,6 +36,16 @@
                     </td>
                     <td><code x-text="d.mac_address" style="font-size:0.85rem;"></code></td>
                     <td x-text="d.ip_address || '-'"></td>
+                    <td>
+                        <select :value="policyByMAC[d.mac_address.toLowerCase()] || ''"
+                                @change="setPolicy(d, $event.target.value)"
+                                style="padding:0.25rem 0.4rem; font-size:0.85rem; min-width:140px;">
+                            <option value="">Default (inherited)</option>
+                            <template x-for="p in policies" :key="p.id">
+                                <option :value="p.id" x-text="p.name + (p.mode === 'strict' ? ' (strict)' : '')"></option>
+                            </template>
+                        </select>
+                    </td>
                     <td>
                         <label class="toggle" @click.prevent="toggleBlock(d)">
                             <input type="checkbox" :checked="d.is_blocked">
@@ -74,9 +85,33 @@
 function devicesApp() {
     return {
         devices: [],
+        policies: [],
+        policyByMAC: {}, // mac (lowercase) → policy_id
         editForm: { mac: '', alias: '', is_blocked: false },
+
         async load() {
-            this.devices = await api.get('/api/devices');
+            this.devices  = await api.get('/api/devices') || [];
+            this.policies = await api.get('/api/policies') || [];
+            const assignments = await api.get('/api/policies/assignments') || [];
+            this.policyByMAC = {};
+            for (const a of assignments) {
+                this.policyByMAC[a.device_mac.toLowerCase()] = a.policy_id;
+            }
+        },
+        async setPolicy(d, policyID) {
+            const mac = d.mac_address;
+            try {
+                if (!policyID) {
+                    await api.delete('/api/devices/' + encodeURIComponent(mac) + '/policy');
+                    notify('Reverted ' + (d.alias || mac) + ' to Default', 'success');
+                } else {
+                    await api.put('/api/devices/' + encodeURIComponent(mac) + '/policy',
+                                  { policy_id: Number(policyID) });
+                    const p = this.policies.find(x => x.id == policyID);
+                    notify((d.alias || mac) + ' → ' + (p ? p.name : policyID), 'success');
+                }
+                this.load();
+            } catch(e) {}
         },
         async toggleBlock(d) {
             d.is_blocked = !d.is_blocked;

@@ -2,6 +2,7 @@ package services
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net"
@@ -398,11 +399,49 @@ func (s *FirewallService) generateConfig(rules []models.FirewallRule, blockedMAC
 
 	// One IP set per policy. 30-day timeout; a re-resolve cron refreshes
 	// entries before they age out so long-idle connections don't break.
+	// Sets are pre-populated from policy_allowed_domains.resolved_ips so
+	// that `flush ruleset` + reload doesn't transiently empty every set
+	// and strand long-lived TLS connections — also means deleting a
+	// domain immediately removes its IPs (sync-flush-on-delete).
 	for _, p := range snap.policies {
 		fmt.Fprintf(&b, "    set %s {\n", policySetName(p.ID))
 		b.WriteString("        type ipv4_addr\n")
 		b.WriteString("        flags timeout\n")
 		b.WriteString("        timeout 30d\n")
+
+		var ips []string
+		seen := make(map[string]struct{})
+		for _, d := range snap.domainsByID[p.ID] {
+			if !d.Enabled || d.ResolvedIPs == "" {
+				continue
+			}
+			var rs []string
+			if err := json.Unmarshal([]byte(d.ResolvedIPs), &rs); err != nil {
+				continue
+			}
+			for _, ip := range rs {
+				ip = strings.TrimSpace(ip)
+				if ip == "" || strings.Contains(ip, ":") {
+					continue // skip IPv6; nft set is ipv4_addr
+				}
+				if _, dup := seen[ip]; dup {
+					continue
+				}
+				seen[ip] = struct{}{}
+				ips = append(ips, ip)
+			}
+		}
+		if len(ips) > 0 {
+			b.WriteString("        elements = {\n")
+			for i, ip := range ips {
+				comma := ","
+				if i == len(ips)-1 {
+					comma = ""
+				}
+				fmt.Fprintf(&b, "            %s%s\n", ip, comma)
+			}
+			b.WriteString("        }\n")
+		}
 		b.WriteString("    }\n\n")
 	}
 
