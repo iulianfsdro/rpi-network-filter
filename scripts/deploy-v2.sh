@@ -4,8 +4,8 @@
 # Preserves admin password, audit log, device history, and block list.
 #
 # Usage (from repo root in Git Bash on Windows):
-#   scripts/deploy-v2.sh                   # Pi at default 192.168.4.1
-#   scripts/deploy-v2.sh 192.168.110.205   # Pi at a different IP
+#   scripts/deploy-v2.sh               # Pi at default 192.168.4.1
+#   scripts/deploy-v2.sh 10.0.0.42     # Pi at a different IP
 #
 # Rollback: checkout master and re-run this script against the same IP.
 

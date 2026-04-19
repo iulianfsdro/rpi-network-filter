@@ -12,6 +12,10 @@ import (
 	"github.com/iulianfsdro/rpi-network-filter/internal/executor"
 )
 
+// ap_channel accepts 1..14 — validated once at package scope rather than
+// compiled on every Apply call.
+var apChannelRe = regexp.MustCompile(`^[0-9]{1,3}$`)
+
 type HotspotService struct {
 	db   *sql.DB
 	exec *executor.Executor
@@ -37,7 +41,7 @@ func (s *HotspotService) Apply() error {
 	if len(pass) < 8 {
 		return fmt.Errorf("wpa_passphrase must be at least 8 chars after sanitisation")
 	}
-	if !regexp.MustCompile(`^[0-9]{1,3}$`).MatchString(channel) {
+	if !apChannelRe.MatchString(channel) {
 		return fmt.Errorf("invalid ap_channel %q", channel)
 	}
 
@@ -82,13 +86,20 @@ func (s *HotspotService) getSettings() map[string]string {
 
 	rows, err := s.db.Query("SELECT key, value FROM settings WHERE key IN ('ap_ssid', 'ap_password', 'ap_channel')")
 	if err != nil {
+		// Don't silently write a default-passwd hostapd.conf — surface
+		// the DB failure so an operator notices instead of booting an
+		// AP with the seed password.
+		log.Printf("[HOTSPOT] read settings: %v — falling back to defaults", err)
 		return defaults
 	}
 	defer rows.Close()
 
 	for rows.Next() {
 		var k, v string
-		rows.Scan(&k, &v)
+		if err := rows.Scan(&k, &v); err != nil {
+			log.Printf("[HOTSPOT] scan setting row: %v", err)
+			continue
+		}
 		defaults[k] = v
 	}
 	return defaults

@@ -276,9 +276,14 @@ func (s *PolicyService) RefreshAll() {
 	var domains []string
 	for rows.Next() {
 		var d string
-		if err := rows.Scan(&d); err == nil {
-			domains = append(domains, d)
+		if err := rows.Scan(&d); err != nil {
+			log.Printf("[POLICY] refresh scan: %v", err)
+			continue
 		}
+		domains = append(domains, d)
+	}
+	if err := rows.Err(); err != nil {
+		log.Printf("[POLICY] refresh iterate: %v", err)
 	}
 	log.Printf("[POLICY] refresh: re-resolving %d domains", len(domains))
 	for _, d := range domains {

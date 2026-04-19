@@ -179,15 +179,23 @@ func (s *TrafficLogService) tailJournal(name, cursorKey string, baseArgs []strin
 
 func (s *TrafficLogService) getCursor(key string) string {
 	var cursor string
-	s.db.QueryRow("SELECT value FROM kv_store WHERE key = ?", key).Scan(&cursor)
+	err := s.db.QueryRow("SELECT value FROM kv_store WHERE key = ?", key).Scan(&cursor)
+	if err != nil && err != sql.ErrNoRows {
+		// Real DB error (locked, missing table, schema drift). Without
+		// this log the tail loop silently re-ingests 24h of kernel
+		// log on every iteration.
+		log.Printf("[TRAFFIC] read cursor %q: %v", key, err)
+	}
 	return cursor
 }
 
 func (s *TrafficLogService) setCursor(key, value string) {
-	s.db.Exec(`
+	if _, err := s.db.Exec(`
 		INSERT INTO kv_store (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)
 		ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP
-	`, key, value)
+	`, key, value); err != nil {
+		log.Printf("[TRAFFIC] write cursor %q: %v", key, err)
+	}
 }
 
 func (s *TrafficLogService) cleanOldEntries() {
@@ -195,17 +203,20 @@ func (s *TrafficLogService) cleanOldEntries() {
 	time.Sleep(1 * time.Hour)
 
 	for {
-		// Get retention from settings
 		var retentionDays string
-		s.db.QueryRow("SELECT value FROM settings WHERE key = 'log_retention_days'").Scan(&retentionDays)
+		if err := s.db.QueryRow("SELECT value FROM settings WHERE key = 'log_retention_days'").Scan(&retentionDays); err != nil && err != sql.ErrNoRows {
+			log.Printf("[TRAFFIC] read log_retention_days: %v", err)
+		}
 		if retentionDays == "" {
 			retentionDays = "30"
 		}
 
-		s.db.Exec(
+		if _, err := s.db.Exec(
 			"DELETE FROM query_log WHERE timestamp < datetime('now', '-' || ? || ' days')",
 			retentionDays,
-		)
+		); err != nil {
+			log.Printf("[TRAFFIC] prune old entries: %v", err)
+		}
 		time.Sleep(6 * time.Hour)
 	}
 }
@@ -325,9 +336,15 @@ func (s *TrafficLogService) RecentEntries(limit int) []TrafficEntry {
 	var entries []TrafficEntry
 	for rows.Next() {
 		var e TrafficEntry
-		rows.Scan(&e.ID, &e.Timestamp, &e.SrcIP, &e.Domain, &e.DstIP, &e.DstPort,
-			&e.Protocol, &e.Action, &e.SrcMAC, &e.Source, &e.Policy)
+		if err := rows.Scan(&e.ID, &e.Timestamp, &e.SrcIP, &e.Domain, &e.DstIP, &e.DstPort,
+			&e.Protocol, &e.Action, &e.SrcMAC, &e.Source, &e.Policy); err != nil {
+			log.Printf("[WARN] RecentEntries scan: %v", err)
+			continue
+		}
 		entries = append(entries, e)
+	}
+	if err := rows.Err(); err != nil {
+		log.Printf("[WARN] RecentEntries iterate: %v", err)
 	}
 	return entries
 }
@@ -426,9 +443,15 @@ func (s *TrafficLogService) QueryPaginated(f TrafficFilter) PagedResult {
 	entries := make([]TrafficEntry, 0, f.PerPage)
 	for rows.Next() {
 		var e TrafficEntry
-		rows.Scan(&e.ID, &e.Timestamp, &e.SrcIP, &e.Domain, &e.DstIP, &e.DstPort,
-			&e.Protocol, &e.Action, &e.SrcMAC, &e.Source, &e.Policy)
+		if err := rows.Scan(&e.ID, &e.Timestamp, &e.SrcIP, &e.Domain, &e.DstIP, &e.DstPort,
+			&e.Protocol, &e.Action, &e.SrcMAC, &e.Source, &e.Policy); err != nil {
+			log.Printf("[WARN] QueryPaginated scan: %v", err)
+			continue
+		}
 		entries = append(entries, e)
+	}
+	if err := rows.Err(); err != nil {
+		log.Printf("[WARN] QueryPaginated iterate: %v", err)
 	}
 
 	return PagedResult{
@@ -472,7 +495,10 @@ func (s *TrafficLogService) Search(query string, limit int) []TrafficEntry {
 	var entries []TrafficEntry
 	for rows.Next() {
 		var e TrafficEntry
-		rows.Scan(&e.ID, &e.Timestamp, &e.SrcIP, &e.Domain, &e.DstIP, &e.DstPort, &e.Protocol, &e.Action, &e.SrcMAC)
+		if err := rows.Scan(&e.ID, &e.Timestamp, &e.SrcIP, &e.Domain, &e.DstIP, &e.DstPort, &e.Protocol, &e.Action, &e.SrcMAC); err != nil {
+			log.Printf("[WARN] Search scan: %v", err)
+			continue
+		}
 		entries = append(entries, e)
 	}
 	return entries
@@ -527,7 +553,7 @@ func (s *TrafficLogService) Summary(rangeStr string) StatsSummary {
 	var stats StatsSummary
 
 	// Single atomic query so counts are consistent
-	s.db.QueryRow(`
+	if err := s.db.QueryRow(`
 		SELECT
 			COUNT(*),
 			SUM(CASE WHEN action = 'query'   THEN 1 ELSE 0 END),
@@ -535,10 +561,12 @@ func (s *TrafficLogService) Summary(rangeStr string) StatsSummary {
 			SUM(CASE WHEN action = 'blocked' THEN 1 ELSE 0 END),
 			COUNT(DISTINCT CASE WHEN domain != '' THEN domain END),
 			COUNT(DISTINCT CASE WHEN client_ip != '' THEN client_ip END)
-		FROM query_log WHERE ` + where).Scan(
+		FROM query_log WHERE `+where).Scan(
 		&stats.Total, &stats.Queries, &stats.Allowed, &stats.Blocked,
 		&stats.UniqueDomains, &stats.UniqueClients,
-	)
+	); err != nil {
+		log.Printf("[WARN] Summary scan: %v", err)
+	}
 
 	return stats
 }
@@ -572,7 +600,10 @@ func (s *TrafficLogService) TopDomains(action, rangeStr string, limit int) []Dom
 	var result []DomainCount
 	for rows.Next() {
 		var d DomainCount
-		rows.Scan(&d.Domain, &d.Count)
+		if err := rows.Scan(&d.Domain, &d.Count); err != nil {
+			log.Printf("[WARN] TopDomains scan: %v", err)
+			continue
+		}
 		result = append(result, d)
 	}
 	return result
@@ -596,7 +627,10 @@ func (s *TrafficLogService) TopClients(rangeStr string, limit int) []ClientCount
 	var result []ClientCount
 	for rows.Next() {
 		var c ClientCount
-		rows.Scan(&c.Client, &c.Count)
+		if err := rows.Scan(&c.Client, &c.Count); err != nil {
+			log.Printf("[WARN] TopClients scan: %v", err)
+			continue
+		}
 		result = append(result, c)
 	}
 	return result
@@ -638,7 +672,10 @@ func (s *TrafficLogService) TimeSeries(rangeStr string) []TimePoint {
 	var result []TimePoint
 	for rows.Next() {
 		var p TimePoint
-		rows.Scan(&p.Time, &p.Queries, &p.Allowed, &p.Blocked)
+		if err := rows.Scan(&p.Time, &p.Queries, &p.Allowed, &p.Blocked); err != nil {
+			log.Printf("[WARN] TimeSeries scan: %v", err)
+			continue
+		}
 		result = append(result, p)
 	}
 	return result

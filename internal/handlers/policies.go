@@ -5,7 +5,6 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strconv"
 	"strings"
 
@@ -15,11 +14,10 @@ import (
 	"github.com/iulianfsdro/rpi-network-filter/internal/services"
 )
 
-var macRe = regexp.MustCompile(`^[0-9a-f]{2}(:[0-9a-f]{2}){5}$`)
-
 // extractMAC URL-decodes the {mac} path param (chi does not decode path
-// parameters), lowercases it, and validates the aa:bb:cc:dd:ee:ff shape.
-// Returns the normalized MAC or an error suitable to hand back as 400.
+// parameters), lowercases it, and validates the aa:bb:cc:dd:ee:ff shape
+// via the canonical services.ValidMAC — single source of truth so the
+// handler's validation can't drift from the rest of the codebase.
 func extractMAC(r *http.Request) (string, error) {
 	raw := chi.URLParam(r, "mac")
 	decoded, err := url.PathUnescape(raw)
@@ -27,7 +25,7 @@ func extractMAC(r *http.Request) (string, error) {
 		return "", errors.New("invalid mac encoding")
 	}
 	mac := strings.ToLower(strings.TrimSpace(decoded))
-	if !macRe.MatchString(mac) {
+	if !services.ValidMAC(mac) {
 		return "", errors.New("invalid mac format (want aa:bb:cc:dd:ee:ff)")
 	}
 	return mac, nil

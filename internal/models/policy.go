@@ -10,7 +10,7 @@ import "time"
 type Policy struct {
 	ID          int64     `json:"id"`
 	Name        string    `json:"name"`
-	Mode        string    `json:"mode"` // "permissive" | "strict"
+	Mode        string    `json:"mode"` // "permissive" | "strict" | "open"
 	Description string    `json:"description"`
 	IsDefault   bool      `json:"is_default"`
 	CreatedAt   time.Time `json:"created_at"`

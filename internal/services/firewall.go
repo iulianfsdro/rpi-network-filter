@@ -337,17 +337,19 @@ func (s *FirewallService) Apply() error {
 		return fmt.Errorf("reload nftables: %w", err)
 	}
 
-	// Write dnsmasq nftset config (one line per domain × policy)
+	// Write dnsmasq nftset config (one line per domain × policy). A
+	// failure here is fatal: if dnsmasq doesn't reload with the new
+	// nftset= directives, subsequent DNS queries can't populate the
+	// per-policy sets and new allow-list entries silently don't work.
 	var totalDomains int
 	for _, ds := range snap.domainsByID {
 		totalDomains += len(ds)
 	}
 	if err := s.writeDnsmasqNftsets(snap); err != nil {
-		log.Printf("[WARN] Failed to write dnsmasq nftsets: %v", err)
-	} else {
-		if _, err := s.exec.Run("systemctl", "reload", "dnsmasq"); err != nil {
-			log.Printf("[WARN] Failed to reload dnsmasq: %v", err)
-		}
+		return fmt.Errorf("write dnsmasq nftsets: %w", err)
+	}
+	if _, err := s.exec.Run("systemctl", "reload", "dnsmasq"); err != nil {
+		return fmt.Errorf("reload dnsmasq: %w", err)
 	}
 
 	log.Printf("[FIREWALL] Applied %d global rules, %d blocked devices, %d policies, %d domain-policy mappings, %d device assignments",

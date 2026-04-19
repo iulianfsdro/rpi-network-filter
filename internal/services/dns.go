@@ -48,7 +48,10 @@ func (s *DNSService) ListEntries() ([]models.DNSBlockEntry, error) {
 }
 
 func (s *DNSService) CreateEntry(domain, category string) (int64, error) {
-	domain = strings.ToLower(strings.TrimSpace(domain))
+	domain = NormalizeDomain(domain)
+	if domain == "" {
+		return 0, fmt.Errorf("invalid domain — must be a plain hostname")
+	}
 	if category == "" {
 		category = "custom"
 	}
