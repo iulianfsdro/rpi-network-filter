@@ -259,6 +259,102 @@ var migrations = []string{
 
 	INSERT OR IGNORE INTO policies (name, mode, description, is_default) VALUES
 		('Open', 'open', 'Trusted devices — no allow-list filtering. Hard block-list + DoH/DoT chokepoint still apply.', 0);`,
+
+	// v10: Tesla MCU3 Preset B block-list + Tesla-policy allow list expansion.
+	//
+	// Derived from a per-endpoint impact analysis of Tesla Model 3 MCU3
+	// firmware 2026.8.6 (fw_dump/TESLA_DOMAINS_BLOCKLIST.md in the sibling
+	// fsd/ project). Preset B = "no config changes / FSD retention": Tesla
+	// can no longer push firmware, rotate features, downgrade tier, or
+	// VIN-ban; all surveillance/telemetry/upload pipes die; nav, maps,
+	// Supercharger, account auth, and music services still work. Mobile
+	// app loses live features (live status, remote lock) because those
+	// ride the Hermes channel we're killing.
+	//
+	// The blocked entries go into blocked_domains (DNS-sinkholed globally,
+	// pre-empting any policy allow list). The Tesla policy allow list also
+	// grows so the car doesn't just hit connman in isolation — it can
+	// resolve go.tesla.services (nav), auth.tesla.com (OAuth),
+	// managed-charging (Supercharger billing + music tokens), and
+	// maps.googleapis.com (fallback geocoding).
+	`INSERT OR IGNORE INTO blocked_domains (domain, match_type, reason) VALUES
+		-- Control plane (OTA + Hermes command channel)
+		('mothership.vn.teslamotors.com',                           'suffix', 'Tesla fleet command/sync (Preset B)'),
+		('firmware-ota.vn.teslamotors.com',                         'suffix', 'Tesla OTA push orchestration'),
+		('firmware-bundles.vn.teslamotors.com',                     'suffix', 'Tesla OTA firmware bundle CDN'),
+		('firmware-media.vn.teslamotors.com',                       'suffix', 'Tesla firmware media assets'),
+		('firmware-media-adapter.vn.teslamotors.com',               'suffix', 'Tesla firmware media adapter'),
+		('hermes-prd.ap.tesla.services',                            'suffix', 'Tesla Hermes mTLS command WebSocket'),
+		('hermes-api.prd.aus07.vn.cloud.tesla.com',                 'suffix', 'Tesla Hermes REST companion'),
+		('hermes-stream-api.prd.aus07.vn.cloud.tesla.com',          'suffix', 'Tesla Hermes streaming pipeline'),
+		('hermes-prd1.i.tslans.net',                                'suffix', 'Tesla Hermes cellular fallback'),
+		('hermes-stream-prd1.i.tslans.net',                         'suffix', 'Tesla Hermes stream cellular'),
+		('apf-api.prd.vn.cloud.tesla.com',                          'suffix', 'Tesla AP Firmware API'),
+		-- Telemetry / surveillance / upload
+		('telemetry-prd.ap.tesla.services',                         'suffix', 'Tesla AP telemetry live stream'),
+		('telemetry-prd.vn.tesla.services',                         'suffix', 'Tesla MCU interaction telemetry'),
+		('logupload-prod.vn.tesla.services',                        'suffix', 'Tesla car log upload'),
+		('x1.ap.tesla.services',                                    'suffix', 'Tesla FSD parking-lot data upload'),
+		('x3-prod.obs.tesla.com',                                   'suffix', 'Tesla Sentry / dashcam cloud upload'),
+		('x3-static.obs.tesla.com',                                 'suffix', 'Tesla Sentry static assets'),
+		('s3.ap.tesla.services',                                    'exact',  'Tesla S3 bulk upload'),
+		('tesla-hermes-snapshot.s3.us-west-2.amazonaws.com',        'exact',  'Tesla Sentry snapshot bucket (US)'),
+		('tesla-hermes-snapshot-eu.s3.eu-central-1.amazonaws.com',  'exact',  'Tesla Sentry snapshot bucket (EU)'),
+		('fake.hypnos.vn.tesla.services',                           'suffix', 'Tesla a/b test + feature-flag sink'),
+		('remote-access-registry.ap.teslamotors.com',               'suffix', 'Tesla engineering remote SSH gateway'),
+		('info-server.mo.tesla.services',                           'suffix', 'Tesla manufacturing info server'),
+		('mes.mo.tesla.services',                                   'suffix', 'Tesla Manufacturing Execution System'),
+		('sim-fac.mo.tesla.services',                               'suffix', 'Tesla SIM provisioning registry'),
+		('api-prd.ap.tesla.services',                               'suffix', 'Tesla AP diagnostic log API'),
+		-- Engineering (should never be reached by production cars)
+		('api-eng.ap.tesla.services',                               'suffix', 'Tesla engineering AP API'),
+		('hermes-eng.ap.tesla.services',                            'suffix', 'Tesla engineering Hermes'),
+		('telemetry-eng.ap.tesla.services',                         'suffix', 'Tesla engineering AP telemetry'),
+		('telemetry-eng.vn.tesla.services',                         'suffix', 'Tesla engineering VN telemetry'),
+		('logupload-eng.vn.tesla.services',                         'suffix', 'Tesla engineering log upload'),
+		('x3-eng.obs.tesla.com',                                    'suffix', 'Tesla engineering object storage'),
+		('apf-api.eng.vn.cloud.tesla.com',                          'suffix', 'Tesla engineering AP firmware'),
+		('webapp-eng.vn.cloud.tesla.com',                           'suffix', 'Tesla engineering webapps'),
+		('navsrv.eng.go.tesla.services',                            'suffix', 'Tesla engineering nav (beats go.tesla.services allow)'),
+		('api-fac-vn-tesla-services.i.tslans.net',                  'suffix', 'Tesla factory provisioning'),
+		('tesla-hermes-snapshot-eng.s3.us-west-2.amazonaws.com',    'exact',  'Tesla engineering snapshot bucket'),
+		('tesla-hermes-snapshot-eng-eu.s3.eu-central-1.amazonaws.com','exact','Tesla engineering snapshot bucket EU'),
+		-- Corporate (never from a car)
+		('typhoon.fw.teslamotors.com',                              'suffix', 'Tesla internal Jenkins build server'),
+		('github-fw.tesla.com',                                     'suffix', 'Tesla internal GitHub'),
+		('stash.teslamotors.com',                                   'exact',  'Tesla internal Bitbucket'),
+		('confluence.teslamotors.com',                              'exact',  'Tesla internal wiki'),
+		('artifactory.teslamotors.com',                             'exact',  'Tesla internal artifactory'),
+		('toolbox.tesla.com',                                       'exact',  'Tesla Toolbox service portal'),
+		('toolbox.teslamotors.com',                                 'exact',  'Tesla Toolbox service portal'),
+		('toolbox-beta.teslamotors.com',                            'suffix', 'Tesla Toolbox beta'),
+		('toolbox-stg.teslamotors.com',                             'suffix', 'Tesla Toolbox staging'),
+		('toolbox-external-stg.teslamotors.com',                    'suffix', 'Tesla Toolbox external staging'),
+		('toolbox-mfg.teslamotors.com',                             'suffix', 'Tesla Toolbox manufacturing'),
+		('va.teslamotors.com',                                      'exact',  'Tesla internal va service'),
+		('epc.tesla.com',                                           'exact',  'Tesla Electronic Parts Catalog'),
+		('parts.tesla.com',                                         'exact',  'Tesla parts portal');
+
+	-- Expand Tesla policy allow list so the car keeps useful features.
+	-- go.tesla.services is a suffix match — covers maps-%1, maps-ap-%1,
+	-- maps-eu-%1, maps-kr-%1, and apmv3.go.tesla.services in one entry.
+	-- navsrv.eng.go.tesla.services (blocked above) beats this via the
+	-- most-specific-match DNS sinkhole rule.
+	INSERT OR IGNORE INTO policy_allowed_domains (policy_id, domain, description)
+	SELECT id, 'auth.tesla.com',                   'Tesla OAuth — mobile app pairing, supercharger billing'
+	FROM policies WHERE name='Tesla';
+
+	INSERT OR IGNORE INTO policy_allowed_domains (policy_id, domain, description)
+	SELECT id, 'managed-charging.sn.tesla.services','Supercharger billing + music-service OAuth proxy'
+	FROM policies WHERE name='Tesla';
+
+	INSERT OR IGNORE INTO policy_allowed_domains (policy_id, domain, description)
+	SELECT id, 'go.tesla.services',                'Tesla map tile + routing (covers maps-*, apmv3 via suffix)'
+	FROM policies WHERE name='Tesla';
+
+	INSERT OR IGNORE INTO policy_allowed_domains (policy_id, domain, description)
+	SELECT id, 'maps.googleapis.com',              'Google maps / geocoding / timezone fallback'
+	FROM policies WHERE name='Tesla';`,
 }
 
 func Migrate(db *sql.DB) error {

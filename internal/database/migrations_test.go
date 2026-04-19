@@ -80,17 +80,36 @@ func TestMigrateSeedsDefaultAndTeslaPolicies(t *testing.T) {
 		t.Errorf("Tesla: mode=%q is_default=%d", mode, isDefault)
 	}
 
-	// Tesla has connman entry
-	var domain string
-	if err := db.QueryRow(`
+	// Tesla allow list must contain connman (seeded at v6) plus the
+	// Preset B entries (seeded at v10). We assert membership rather
+	// than count so adding further domains doesn't break the test.
+	rows, err := db.Query(`
 		SELECT pad.domain
 		FROM policy_allowed_domains pad
 		JOIN policies p ON p.id = pad.policy_id
-		WHERE p.name='Tesla'`).Scan(&domain); err != nil {
-		t.Fatalf("Tesla domain: %v", err)
+		WHERE p.name='Tesla'`)
+	if err != nil {
+		t.Fatalf("Tesla domains query: %v", err)
 	}
-	if domain != "connman.vn.tesla.services" {
-		t.Errorf("Tesla domain = %q, want connman.vn.tesla.services", domain)
+	defer rows.Close()
+	teslaDomains := map[string]bool{}
+	for rows.Next() {
+		var d string
+		if err := rows.Scan(&d); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		teslaDomains[d] = true
+	}
+	for _, want := range []string{
+		"connman.vn.tesla.services",
+		"auth.tesla.com",
+		"managed-charging.sn.tesla.services",
+		"go.tesla.services",
+		"maps.googleapis.com",
+	} {
+		if !teslaDomains[want] {
+			t.Errorf("Tesla allow list missing %q", want)
+		}
 	}
 
 	// Open policy from v9
