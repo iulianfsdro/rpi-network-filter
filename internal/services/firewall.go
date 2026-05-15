@@ -401,8 +401,34 @@ func (s *FirewallService) generateConfig(rules []models.FirewallRule, blockedMAC
 	b.WriteString("#!/usr/sbin/nft -f\n\n")
 	b.WriteString("flush ruleset\n\n")
 
+	// MACs of devices assigned to the Tesla policy. Their plain-HTTP
+	// (tcp/80) traffic is DNAT-redirected to the local connman spoof
+	// responder. The connman captive-check resolves
+	// connman.vn.tesla.services to its real public CloudFront IP and
+	// connects on :80 — the Tesla refuses to connect to a private IP, so
+	// DNS hijacking can't work. Redirecting :80 only affects the connman
+	// probe: every real Tesla service uses :443 (confirmed by capture).
+	var teslaMACs []string
+	for _, p := range snap.policies {
+		if !strings.EqualFold(p.Name, "Tesla") {
+			continue
+		}
+		for _, a := range snap.assignments {
+			if a.PolicyID == p.ID && ValidMAC(a.DeviceMAC) {
+				teslaMACs = append(teslaMACs, a.DeviceMAC)
+			}
+		}
+	}
+
 	// NAT table
 	b.WriteString("table ip nat {\n")
+	b.WriteString("    chain prerouting {\n")
+	b.WriteString("        type nat hook prerouting priority dstnat; policy accept;\n")
+	for _, mac := range teslaMACs {
+		fmt.Fprintf(&b, "        iifname \"%s\" ether saddr %s tcp dport 80 dnat to %s\n",
+			s.cfg.LANInterface, strings.ToLower(mac), s.cfg.LANGateway)
+	}
+	b.WriteString("    }\n")
 	b.WriteString("    chain postrouting {\n")
 	b.WriteString("        type nat hook postrouting priority srcnat; policy accept;\n")
 	fmt.Fprintf(&b, "        oifname \"%s\" masquerade\n", s.cfg.WANInterface)
@@ -480,7 +506,12 @@ func (s *FirewallService) generateConfig(rules []models.FirewallRule, blockedMAC
 	b.WriteString("        }\n")
 	b.WriteString("    }\n\n")
 
-	// Input chain (unchanged)
+	// Input chain — connections terminating on the Pi itself. tcp/80 and
+	// tcp/443 carry the captive-check spoof responder; both are logged on
+	// the SYN (the first rule already fast-paths established traffic, so
+	// only new connections reach these rules) so a Tesla connman probe is
+	// observable — which port it lands on reveals HTTP vs HTTPS. The
+	// trailing logged drop catches a probe to any other port.
 	b.WriteString("    chain input {\n")
 	b.WriteString("        type filter hook input priority filter; policy drop;\n")
 	b.WriteString("        ct state established,related accept\n")
@@ -488,9 +519,11 @@ func (s *FirewallService) generateConfig(rules []models.FirewallRule, blockedMAC
 	fmt.Fprintf(&b, "        iifname \"%s\" udp dport 53 accept\n", s.cfg.LANInterface)
 	fmt.Fprintf(&b, "        iifname \"%s\" udp dport 67 accept\n", s.cfg.LANInterface)
 	fmt.Fprintf(&b, "        iifname \"%s\" tcp dport 22 accept\n", s.cfg.LANInterface)
-	fmt.Fprintf(&b, "        iifname \"%s\" tcp dport 80 accept\n", s.cfg.LANInterface)
+	fmt.Fprintf(&b, "        iifname \"%s\" tcp dport 80 log prefix \"[NETFILTER-INPUT dport=80] \" accept\n", s.cfg.LANInterface)
+	fmt.Fprintf(&b, "        iifname \"%s\" tcp dport 443 log prefix \"[NETFILTER-INPUT dport=443] \" accept\n", s.cfg.LANInterface)
 	fmt.Fprintf(&b, "        iifname \"%s\" tcp dport 8443 accept\n", s.cfg.LANInterface)
 	b.WriteString("        iifname \"lo\" accept\n")
+	fmt.Fprintf(&b, "        iifname \"%s\" meta l4proto tcp ct state new log prefix \"[NETFILTER-INPUT-DROP] \" drop\n", s.cfg.LANInterface)
 	b.WriteString("    }\n\n")
 
 	// One chain per policy. Each chain:

@@ -40,7 +40,7 @@ func New(db *sql.DB, exec *executor.Executor, cfg config.Config) *Services {
 		Audit:      audit,
 		TrafficLog: trafficLog,
 		Policy:     policy,
-		Spoof:      NewSpoofService(cfg),
+		Spoof:      NewSpoofService(cfg, exec),
 	}
 }
 

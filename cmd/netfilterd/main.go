@@ -74,11 +74,11 @@ func main() {
 		os.Exit(0)
 	}
 
-	// Write the captive-check spoof override before ApplyAll so the
-	// dnsmasq reload that FirewallService.Apply triggers picks it up
-	// without an extra reload.
-	if err := svc.Spoof.WriteDnsmasqConf(); err != nil {
-		log.Printf("[WARN] Failed to write spoof dnsmasq override: %v", err)
+	// Drop the legacy DNS-hijack override if a prior version left one —
+	// connman must resolve to its real public IP for the transparent
+	// DNAT spoof (firewall prerouting) to work.
+	if err := svc.Spoof.EnsureNoDnsmasqHijack(); err != nil {
+		log.Printf("[WARN] Failed to clear legacy spoof dnsmasq override: %v", err)
 	}
 
 	// Apply all rules on startup
@@ -89,6 +89,11 @@ func main() {
 	go func() {
 		if err := svc.Spoof.ListenAndServe(); err != nil {
 			log.Printf("[SPOOF] listener exited: %v", err)
+		}
+	}()
+	go func() {
+		if err := svc.Spoof.ListenAndServeTLS(); err != nil {
+			log.Printf("[SPOOF] TLS listener exited: %v", err)
 		}
 	}()
 	svc.TrafficLog.StartTailing()
