@@ -73,9 +73,15 @@ func (h *SystemHandler) StatsSummary(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *SystemHandler) StatsTopDomains(w http.ResponseWriter, r *http.Request) {
-	action := r.URL.Query().Get("action")
-	rangeStr := r.URL.Query().Get("range")
-	result := h.trafficLog.TopDomains(action, rangeStr, 10)
+	q := r.URL.Query()
+	limit, _ := strconv.Atoi(q.Get("limit"))
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	result := h.trafficLog.TopDomains(q.Get("action"), q.Get("range"), q.Get("q"), limit)
 	if result == nil {
 		result = []services.DomainCount{}
 	}
@@ -83,8 +89,15 @@ func (h *SystemHandler) StatsTopDomains(w http.ResponseWriter, r *http.Request) 
 }
 
 func (h *SystemHandler) StatsTopClients(w http.ResponseWriter, r *http.Request) {
-	rangeStr := r.URL.Query().Get("range")
-	result := h.trafficLog.TopClients(rangeStr, 10)
+	q := r.URL.Query()
+	limit, _ := strconv.Atoi(q.Get("limit"))
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	result := h.trafficLog.TopClients(q.Get("range"), limit)
 	if result == nil {
 		result = []services.ClientCount{}
 	}

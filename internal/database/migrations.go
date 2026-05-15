@@ -355,6 +355,15 @@ var migrations = []string{
 	INSERT OR IGNORE INTO policy_allowed_domains (policy_id, domain, description)
 	SELECT id, 'maps.googleapis.com',              'Google maps / geocoding / timezone fallback'
 	FROM policies WHERE name='Tesla';`,
+
+	// v11: per-device opt-out from traffic logging. The flag is purely a
+	// log-suppression hint — firewall rules still apply as configured;
+	// only the query_log INSERT is skipped for events sourced from this
+	// device. Default 0 means existing devices keep being logged. Used
+	// to silence chatty trusted devices (e.g. owner laptop generating
+	// thousands of DNS lookups per minute) so the traffic monitor stays
+	// useful for spotting anomalies on locked-down devices.
+	`ALTER TABLE devices ADD COLUMN ignore_traffic_log INTEGER NOT NULL DEFAULT 0;`,
 }
 
 func Migrate(db *sql.DB) error {

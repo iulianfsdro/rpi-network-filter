@@ -31,12 +31,24 @@ type TrafficLogService struct {
 	db       *sql.DB
 	dnsCache map[string]string
 	dnsMu    sync.RWMutex
+
+	// Per-device log-suppression cache. Holds the lowercased MAC and
+	// last-known IP of every device with devices.ignore_traffic_log = 1.
+	// Checked in the hot ingest path so chatty devices (e.g. owner laptop
+	// burning hundreds of DNS queries per second) don't fill query_log.
+	// Refreshed periodically by RefreshIgnoreCache and on demand from the
+	// device-update handler.
+	ignoreMu   sync.RWMutex
+	ignoredMACs map[string]struct{}
+	ignoredIPs  map[string]struct{}
 }
 
 func NewTrafficLogService(db *sql.DB) *TrafficLogService {
 	return &TrafficLogService{
-		db:       db,
-		dnsCache: make(map[string]string),
+		db:          db,
+		dnsCache:    make(map[string]string),
+		ignoredMACs: make(map[string]struct{}),
+		ignoredIPs:  make(map[string]struct{}),
 	}
 }
 
@@ -64,9 +76,96 @@ type journalEntry struct {
 }
 
 func (s *TrafficLogService) StartTailing() {
+	// Prime the ignore cache before any tail starts ingesting so the
+	// first event from an ignored device isn't accidentally logged.
+	s.RefreshIgnoreCache()
 	go s.tailJournal("kernel", "kernel-cursor", []string{"-k"})
 	go s.tailDnsmasqLogFile()
 	go s.cleanOldEntries()
+	go s.refreshIgnoreCacheLoop()
+}
+
+// RefreshIgnoreCache rebuilds the in-memory set of MACs/IPs whose traffic
+// events should be skipped at INSERT time. Call after any change to a
+// device's ignore_traffic_log column, or rely on the periodic refresh.
+func (s *TrafficLogService) RefreshIgnoreCache() {
+	rows, err := s.db.Query("SELECT mac_address, ip_address FROM devices WHERE ignore_traffic_log = 1")
+	if err != nil {
+		log.Printf("[TRAFFIC] refresh ignore cache: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	macs := make(map[string]struct{})
+	ips := make(map[string]struct{})
+	for rows.Next() {
+		var mac, ip string
+		if err := rows.Scan(&mac, &ip); err != nil {
+			continue
+		}
+		if mac != "" {
+			macs[strings.ToLower(strings.TrimSpace(mac))] = struct{}{}
+		}
+		if ip != "" {
+			ips[strings.TrimSpace(ip)] = struct{}{}
+		}
+	}
+
+	s.ignoreMu.Lock()
+	s.ignoredMACs = macs
+	s.ignoredIPs = ips
+	s.ignoreMu.Unlock()
+}
+
+func (s *TrafficLogService) refreshIgnoreCacheLoop() {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		s.RefreshIgnoreCache()
+	}
+}
+
+// isIgnored returns true if a traffic event from this MAC or IP should be
+// dropped at INSERT time. Either match wins — DNS events have no MAC, so
+// the IP cache catches them; forward events always carry a MAC.
+func (s *TrafficLogService) isIgnored(mac, ip string) bool {
+	if mac == "" && ip == "" {
+		return false
+	}
+	s.ignoreMu.RLock()
+	defer s.ignoreMu.RUnlock()
+	if mac != "" {
+		if _, ok := s.ignoredMACs[strings.ToLower(strings.TrimSpace(mac))]; ok {
+			return true
+		}
+	}
+	if ip != "" {
+		if _, ok := s.ignoredIPs[strings.TrimSpace(ip)]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// WipeForDevice deletes every query_log row attributable to this device.
+// MAC matches forward (nflog) events; IP matches DNS events (which carry
+// no MAC). Pass the device's last-known IP from the devices row — old IPs
+// from a prior DHCP lease will still leak through, which is acceptable.
+func (s *TrafficLogService) WipeForDevice(mac, ip string) (int64, error) {
+	mac = strings.ToLower(strings.TrimSpace(mac))
+	ip = strings.TrimSpace(ip)
+	if mac == "" && ip == "" {
+		return 0, nil
+	}
+	res, err := s.db.Exec(
+		"DELETE FROM query_log WHERE LOWER(client_mac) = ? OR client_ip = ?",
+		mac, ip,
+	)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
 }
 
 // tailDnsmasqLogFile tails /var/log/dnsmasq.log (the default on Raspberry Pi OS
@@ -308,6 +407,9 @@ func (s *TrafficLogService) parseDnsLine(message, realtimeTS string) {
 func (s *TrafficLogService) insertEntry(e TrafficEntry) {
 	if e.Source == "" {
 		e.Source = "forward"
+	}
+	if s.isIgnored(e.SrcMAC, e.SrcIP) {
+		return
 	}
 	_, err := s.db.Exec(`
 		INSERT INTO query_log (timestamp, client_ip, domain, dst_ip, dst_port, protocol, action, client_mac, source, policy)
@@ -571,9 +673,9 @@ func (s *TrafficLogService) Summary(rangeStr string) StatsSummary {
 	return stats
 }
 
-func (s *TrafficLogService) TopDomains(action, rangeStr string, limit int) []DomainCount {
+func (s *TrafficLogService) TopDomains(action, rangeStr, q string, limit int) []DomainCount {
 	if limit <= 0 {
-		limit = 10
+		limit = 50
 	}
 	where := s.timeWhereClause(rangeStr)
 
@@ -587,6 +689,14 @@ func (s *TrafficLogService) TopDomains(action, rangeStr string, limit int) []Dom
 	if action != "" && action != "all" {
 		query += " AND action = ?"
 		args = append(args, action)
+	}
+	if q != "" {
+		// Filter against both columns so a search hits whether the row
+		// has a resolved domain (DNS events) or just an IP (some forward
+		// events). Mirrors the LIKE pattern used in QueryPaginated.
+		pattern := "%" + q + "%"
+		query += " AND (domain LIKE ? OR dst_ip LIKE ?)"
+		args = append(args, pattern, pattern)
 	}
 	query += " GROUP BY dest ORDER BY cnt DESC LIMIT ?"
 	args = append(args, limit)

@@ -19,6 +19,7 @@
                 <th>IP Address</th>
                 <th>Policy</th>
                 <th>Blocked</th>
+                <th title="Off = traffic events from this device are dropped before they hit query_log. Firewall rules still apply.">Log</th>
                 <th>Actions</th>
             </tr>
         </thead>
@@ -53,6 +54,13 @@
                         </label>
                     </td>
                     <td>
+                        <label class="toggle" @click.prevent="toggleLog(d)"
+                               :title="d.ignore_traffic_log ? 'Logging suppressed — flip on to resume logging' : 'Logging on — flip off to ignore this device and wipe its history'">
+                            <input type="checkbox" :checked="!d.ignore_traffic_log">
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </td>
+                    <td>
                         <button class="outline btn-sm" @click="editDevice(d)">Edit</button>
                     </td>
                 </tr>
@@ -71,6 +79,14 @@
                 <input type="checkbox" x-model="editForm.is_blocked">
                 Block all traffic
             </label>
+            <label>
+                <input type="checkbox" x-model="editForm.ignore_traffic_log">
+                Ignore traffic logs
+                <small style="display:block; color:var(--pico-muted-color);">
+                    Drops events from the traffic monitor before insert (firewall rules unaffected).
+                    Enabling wipes existing history for this device.
+                </small>
+            </label>
             <footer style="display:flex; gap:0.5rem; justify-content:flex-end;">
                 <button class="outline secondary" @click="closeEdit()">Cancel</button>
                 <button @click="saveDevice()">Save</button>
@@ -83,11 +99,22 @@
 {{define "scripts"}}
 <script>
 function devicesApp() {
+    // Builds the full PUT payload for /api/devices/{mac} so partial
+    // updates (toggleBlock, toggleLog) don't accidentally clobber the
+    // fields they don't touch — the backend reads every key on each call.
+    function devicePayload(d) {
+        return {
+            alias: d.alias || '',
+            is_blocked: !!d.is_blocked,
+            ignore_traffic_log: !!d.ignore_traffic_log,
+        };
+    }
+
     return {
         devices: [],
         policies: [],
         policyByMAC: {}, // mac (lowercase) → policy_id
-        editForm: { mac: '', alias: '', is_blocked: false },
+        editForm: { mac: '', alias: '', is_blocked: false, ignore_traffic_log: false },
 
         async load() {
             this.devices  = await api.get('/api/devices') || [];
@@ -116,17 +143,39 @@ function devicesApp() {
         async toggleBlock(d) {
             d.is_blocked = !d.is_blocked;
             try {
-                await api.put('/api/devices/' + encodeURIComponent(d.mac_address), {
-                    alias: d.alias,
-                    is_blocked: d.is_blocked
-                });
+                await api.put('/api/devices/' + encodeURIComponent(d.mac_address), devicePayload(d));
                 notify(d.is_blocked ? 'Device blocked' : 'Device unblocked', 'success');
             } catch(e) {
                 d.is_blocked = !d.is_blocked;
             }
         },
+        async toggleLog(d) {
+            // The toggle in the table reflects "logging on", so flipping it
+            // off corresponds to ignore_traffic_log = true. Confirm before
+            // wiping history when turning logging off.
+            const turningOff = !d.ignore_traffic_log;
+            if (turningOff && !confirm(
+                'Stop logging traffic from "' + (d.alias || d.hostname || d.mac_address) +
+                '" and wipe its existing history from the traffic monitor?\n\n' +
+                'Firewall rules will continue to apply unchanged.'
+            )) {
+                return;
+            }
+            d.ignore_traffic_log = !d.ignore_traffic_log;
+            try {
+                await api.put('/api/devices/' + encodeURIComponent(d.mac_address), devicePayload(d));
+                notify(d.ignore_traffic_log ? 'Traffic logging suppressed; history wiped' : 'Traffic logging resumed', 'success');
+            } catch(e) {
+                d.ignore_traffic_log = !d.ignore_traffic_log;
+            }
+        },
         editDevice(d) {
-            this.editForm = { mac: d.mac_address, alias: d.alias, is_blocked: d.is_blocked };
+            this.editForm = {
+                mac: d.mac_address,
+                alias: d.alias,
+                is_blocked: d.is_blocked,
+                ignore_traffic_log: !!d.ignore_traffic_log,
+            };
             document.getElementById('edit-dialog').showModal();
         },
         closeEdit() {
@@ -135,7 +184,8 @@ function devicesApp() {
         async saveDevice() {
             await api.put('/api/devices/' + encodeURIComponent(this.editForm.mac), {
                 alias: this.editForm.alias,
-                is_blocked: this.editForm.is_blocked
+                is_blocked: this.editForm.is_blocked,
+                ignore_traffic_log: this.editForm.ignore_traffic_log,
             });
             notify('Device updated', 'success');
             this.closeEdit();
