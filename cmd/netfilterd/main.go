@@ -74,11 +74,28 @@ func main() {
 		os.Exit(0)
 	}
 
+	// Drop the legacy DNS-hijack override if a prior version left one —
+	// connman must resolve to its real public IP for the transparent
+	// DNAT spoof (firewall prerouting) to work.
+	if err := svc.Spoof.EnsureNoDnsmasqHijack(); err != nil {
+		log.Printf("[WARN] Failed to clear legacy spoof dnsmasq override: %v", err)
+	}
+
 	// Apply all rules on startup
 	svc.ApplyAll()
 
 	// Start background services
 	go svc.Network.StartScanner()
+	go func() {
+		if err := svc.Spoof.ListenAndServe(); err != nil {
+			log.Printf("[SPOOF] listener exited: %v", err)
+		}
+	}()
+	go func() {
+		if err := svc.Spoof.ListenAndServeTLS(); err != nil {
+			log.Printf("[SPOOF] TLS listener exited: %v", err)
+		}
+	}()
 	svc.TrafficLog.StartTailing()
 	// Periodic re-resolve of allow-list domains so the per-policy nft sets
 	// stay populated even when clients cache DNS answers past the dnsmasq

@@ -15,6 +15,7 @@
         <div style="flex:1"></div>
         <button type="button" class="outline btn-sm" @click="togglePause()" x-text="live ? 'Pause' : 'Resume'"></button>
         <button type="button" class="outline btn-sm" @click="load()">Refresh</button>
+        <button type="button" class="outline btn-sm" @click="openMuted()" x-text="'Muted (' + muted.length + ')'"></button>
         <button type="button" class="outline btn-sm" style="color:var(--danger);" @click="clearLog()">Clear Log</button>
     </div>
 
@@ -116,12 +117,16 @@
                             }" x-text="e.action"></span>
                         </td>
                         <td>
-                            <template x-if="e.action === 'query' && e.domain">
-                                <button type="button" class="outline btn-sm" @click="quickAllow(e.domain)" style="font-size:0.72rem;">Allow</button>
-                            </template>
-                            <template x-if="e.action === 'blocked' && e.domain">
-                                <button type="button" class="outline btn-sm" @click="quickAllow(e.domain)" style="font-size:0.72rem;">Allow</button>
-                            </template>
+                            <div style="display:flex; gap:0.25rem;">
+                                <template x-if="e.domain && (e.action === 'query' || e.action === 'blocked')">
+                                    <button type="button" class="outline btn-sm" @click="quickAllow(e.domain)" style="font-size:0.72rem;">Allow</button>
+                                </template>
+                                <template x-if="e.domain">
+                                    <button type="button" class="outline btn-sm" @click="muteDomain(e.domain)"
+                                            style="font-size:0.72rem; color:var(--text-muted);"
+                                            title="Stop logging this domain — drops its events before they reach the monitor">Mute</button>
+                                </template>
+                            </div>
                         </td>
                     </tr>
                 </template>
@@ -144,6 +149,39 @@
         <button type="button" class="outline btn-sm" :disabled="page === pages" @click="page++; load()">Next ›</button>
         <button type="button" class="outline btn-sm" :disabled="page === pages" @click="page=pages; load()">Last »</button>
     </div>
+
+    <!-- Muted domains manager -->
+    <dialog id="muted-dialog">
+        <article style="min-width:min(90vw, 440px);">
+            <header><h5 style="margin:0;">Muted domains</h5></header>
+            <p style="font-size:0.8rem; color:var(--text-muted); margin-top:0;">
+                Events for these domains are dropped before they reach the monitor
+                (firewall rules are unaffected). Removing a pattern resumes logging.
+            </p>
+            <p x-show="muted.length === 0" style="color:var(--text-muted); text-align:center; margin:1rem 0;">
+                Nothing muted yet — use the <strong>Mute</strong> button on a noisy row.
+            </p>
+            <table x-show="muted.length > 0">
+                <tbody>
+                    <template x-for="m in muted" :key="m.id">
+                        <tr>
+                            <td>
+                                <code x-text="m.pattern" style="font-size:0.82rem;"></code>
+                                <small x-text="m.match_type" style="color:var(--text-muted); margin-left:0.4rem;"></small>
+                            </td>
+                            <td style="width:48px; text-align:right;">
+                                <button type="button" class="outline btn-sm" style="color:var(--danger); font-size:0.72rem;"
+                                        @click="removeMuted(m.id)" title="Unmute">✕</button>
+                            </td>
+                        </tr>
+                    </template>
+                </tbody>
+            </table>
+            <footer style="display:flex; justify-content:flex-end;">
+                <button class="outline secondary" @click="closeMuted()">Close</button>
+            </footer>
+        </article>
+    </dialog>
 </div>
 {{end}}
 
@@ -159,6 +197,7 @@ function trafficApp() {
         loading: false,
         live: true,
         refreshTimer: null,
+        muted: [],
         filter: {
             action: '',
             q: '',
@@ -243,6 +282,36 @@ function trafficApp() {
             } catch(e) { /* api.request already showed the error toast */ }
         },
 
+        async loadMuted() {
+            this.muted = await api.get('/api/system/traffic/muted') || [];
+        },
+
+        openMuted() {
+            this.loadMuted();
+            document.getElementById('muted-dialog').showModal();
+        },
+
+        closeMuted() {
+            document.getElementById('muted-dialog').close();
+        },
+
+        async muteDomain(domain) {
+            try {
+                await api.post('/api/system/traffic/muted', { domain: domain });
+                notify('Muted ' + domain + ' — new events will be dropped', 'success');
+                await this.loadMuted();
+                this.load();
+            } catch(e) { /* api.request already showed the error toast */ }
+        },
+
+        async removeMuted(id) {
+            try {
+                await api.delete('/api/system/traffic/muted/' + id);
+                await this.loadMuted();
+                notify('Unmuted — events will be logged again', 'success');
+            } catch(e) { /* api.request already showed the error toast */ }
+        },
+
         fmtTime(ts) {
             if (!ts) return '-';
             // Try to parse various formats
@@ -256,6 +325,7 @@ function trafficApp() {
 
         init() {
             this.startRefresh();
+            this.loadMuted();
         }
     };
 }

@@ -2,8 +2,8 @@
 
 {{define "content"}}
 <div x-data="statsApp()" x-init="load()">
-    <!-- Range selector -->
-    <div style="display:flex; gap:0.5rem; margin-bottom:1.2rem; flex-wrap:wrap;">
+    <!-- Range selector + top-list search -->
+    <div style="display:flex; gap:0.5rem; margin-bottom:1.2rem; flex-wrap:wrap; align-items:center;">
         <template x-for="r in ranges" :key="r.value">
             <button type="button"
                 class="range-btn"
@@ -11,7 +11,18 @@
                 @click="range = r.value; load()"
                 x-text="r.label"></button>
         </template>
-        <div style="flex:1"></div>
+        <div style="flex:1; min-width:200px; position:relative;">
+            <input type="search"
+                placeholder="Filter top lists by domain or IP (e.g. tesla)…"
+                x-model="query"
+                @input.debounce.300ms="loadTopLists()"
+                style="margin:0; padding-right:2rem;">
+            <button type="button"
+                x-show="query"
+                @click="query = ''; loadTopLists()"
+                title="Clear filter"
+                style="position:absolute; right:0.4rem; top:50%; transform:translateY(-50%); background:none; border:none; color:var(--text-muted); cursor:pointer; padding:0.2rem 0.4rem;">×</button>
+        </div>
         <button type="button" class="outline" @click="load()">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
             Refresh
@@ -148,6 +159,8 @@ function statsApp() {
             { value: '30d', label: '30D' },
             { value: 'all', label: 'All' },
         ],
+        query: '',
+        topLimit: 50,
         summary: {},
         topBlocked: [],
         topAllowed: [],
@@ -155,22 +168,38 @@ function statsApp() {
         topClients: [],
         chart: null,
 
+        // Full refresh — summary + top lists + chart. Triggered on first
+        // load and whenever the time range changes.
         async load() {
             const r = '?range=' + this.range;
-            const [summary, blocked, allowed, queries, clients, ts] = await Promise.all([
+            const [summary, ts] = await Promise.all([
                 api.get('/api/system/stats/summary' + r),
-                api.get('/api/system/stats/top-domains?action=blocked&range=' + this.range),
-                api.get('/api/system/stats/top-domains?action=allowed&range=' + this.range),
-                api.get('/api/system/stats/top-domains?action=query&range=' + this.range),
-                api.get('/api/system/stats/top-clients' + r),
                 api.get('/api/system/stats/timeseries' + r),
             ]);
             this.summary = summary;
+            this.renderChart(ts || []);
+            await this.loadTopLists();
+        },
+
+        // Top lists only — re-runs whenever the search box changes so the
+        // user gets sub-second feedback while typing without re-fetching
+        // the chart/summary on every keystroke.
+        async loadTopLists() {
+            const params = new URLSearchParams({ range: this.range, limit: String(this.topLimit) });
+            if (this.query) params.set('q', this.query);
+            const base = '/api/system/stats/top-domains?';
+            const [blocked, allowed, queries, clients] = await Promise.all([
+                api.get(base + params + '&action=blocked'),
+                api.get(base + params + '&action=allowed'),
+                api.get(base + params + '&action=query'),
+                // Top Clients also gets the bumped limit; client_ip search
+                // would be unhelpful (substring of an IP), so q isn't sent.
+                api.get('/api/system/stats/top-clients?range=' + this.range + '&limit=' + this.topLimit),
+            ]);
             this.topBlocked = blocked || [];
             this.topAllowed = allowed || [];
             this.topQueries = queries || [];
             this.topClients = clients || [];
-            this.renderChart(ts || []);
         },
 
         renderChart(points) {

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log"
 	"os"
 	"os/exec"
@@ -11,6 +12,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
+
+	"github.com/iulianfsdro/rpi-network-filter/internal/models"
 )
 
 type TrafficEntry struct {
@@ -31,12 +35,33 @@ type TrafficLogService struct {
 	db       *sql.DB
 	dnsCache map[string]string
 	dnsMu    sync.RWMutex
+
+	// Per-device log-suppression cache. Holds the lowercased MAC and
+	// last-known IP of every device with devices.ignore_traffic_log = 1.
+	// Checked in the hot ingest path so chatty devices (e.g. owner laptop
+	// burning hundreds of DNS queries per second) don't fill query_log.
+	// Refreshed periodically by RefreshIgnoreCache and on demand from the
+	// device-update handler.
+	ignoreMu   sync.RWMutex
+	ignoredMACs map[string]struct{}
+	ignoredIPs  map[string]struct{}
+
+	// Muted-domain cache. Patterns from muted_domains whose events are
+	// dropped at ingest so a spammy device (e.g. the Tesla at ~10 req/s)
+	// can't bury the traffic monitor. Checked in the same hot path as the
+	// ignore cache. Refreshed by RefreshMuteCache.
+	mutedMu     sync.RWMutex
+	mutedExact  map[string]struct{}
+	mutedSuffix []string
 }
 
 func NewTrafficLogService(db *sql.DB) *TrafficLogService {
 	return &TrafficLogService{
-		db:       db,
-		dnsCache: make(map[string]string),
+		db:          db,
+		dnsCache:    make(map[string]string),
+		ignoredMACs: make(map[string]struct{}),
+		ignoredIPs:  make(map[string]struct{}),
+		mutedExact:  make(map[string]struct{}),
 	}
 }
 
@@ -64,9 +89,205 @@ type journalEntry struct {
 }
 
 func (s *TrafficLogService) StartTailing() {
+	// Prime the ignore + mute caches before any tail starts ingesting so
+	// the first event from a suppressed device/domain isn't logged.
+	s.RefreshIgnoreCache()
+	s.RefreshMuteCache()
 	go s.tailJournal("kernel", "kernel-cursor", []string{"-k"})
 	go s.tailDnsmasqLogFile()
 	go s.cleanOldEntries()
+	go s.refreshCachesLoop()
+}
+
+// RefreshIgnoreCache rebuilds the in-memory set of MACs/IPs whose traffic
+// events should be skipped at INSERT time. Call after any change to a
+// device's ignore_traffic_log column, or rely on the periodic refresh.
+func (s *TrafficLogService) RefreshIgnoreCache() {
+	rows, err := s.db.Query("SELECT mac_address, ip_address FROM devices WHERE ignore_traffic_log = 1")
+	if err != nil {
+		log.Printf("[TRAFFIC] refresh ignore cache: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	macs := make(map[string]struct{})
+	ips := make(map[string]struct{})
+	for rows.Next() {
+		var mac, ip string
+		if err := rows.Scan(&mac, &ip); err != nil {
+			continue
+		}
+		if mac != "" {
+			macs[strings.ToLower(strings.TrimSpace(mac))] = struct{}{}
+		}
+		if ip != "" {
+			ips[strings.TrimSpace(ip)] = struct{}{}
+		}
+	}
+
+	s.ignoreMu.Lock()
+	s.ignoredMACs = macs
+	s.ignoredIPs = ips
+	s.ignoreMu.Unlock()
+}
+
+func (s *TrafficLogService) refreshCachesLoop() {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		s.RefreshIgnoreCache()
+		s.RefreshMuteCache()
+	}
+}
+
+// RefreshMuteCache rebuilds the in-memory set of muted domain patterns.
+// Call after any change to muted_domains, or rely on the periodic refresh.
+func (s *TrafficLogService) RefreshMuteCache() {
+	rows, err := s.db.Query("SELECT pattern, match_type FROM muted_domains WHERE enabled = 1")
+	if err != nil {
+		log.Printf("[TRAFFIC] refresh mute cache: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	exact := make(map[string]struct{})
+	var suffix []string
+	for rows.Next() {
+		var pattern, matchType string
+		if err := rows.Scan(&pattern, &matchType); err != nil {
+			continue
+		}
+		pattern = strings.ToLower(strings.TrimSpace(pattern))
+		if pattern == "" {
+			continue
+		}
+		if matchType == "exact" {
+			exact[pattern] = struct{}{}
+		} else {
+			suffix = append(suffix, pattern)
+		}
+	}
+
+	s.mutedMu.Lock()
+	s.mutedExact = exact
+	s.mutedSuffix = suffix
+	s.mutedMu.Unlock()
+}
+
+// isMuted reports whether an event for this domain should be dropped at
+// INSERT time. Suffix patterns match the domain and any deeper subdomain.
+func (s *TrafficLogService) isMuted(domain string) bool {
+	d := strings.ToLower(strings.TrimSpace(domain))
+	if d == "" {
+		return false
+	}
+	s.mutedMu.RLock()
+	defer s.mutedMu.RUnlock()
+	if _, ok := s.mutedExact[d]; ok {
+		return true
+	}
+	for _, p := range s.mutedSuffix {
+		if d == p || strings.HasSuffix(d, "."+p) {
+			return true
+		}
+	}
+	return false
+}
+
+// ListMuted returns every muted-domain pattern.
+func (s *TrafficLogService) ListMuted() ([]models.MutedDomain, error) {
+	rows, err := s.db.Query(`
+		SELECT id, pattern, match_type, enabled, created_at
+		FROM muted_domains ORDER BY pattern ASC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("query muted domains: %w", err)
+	}
+	defer rows.Close()
+
+	out := []models.MutedDomain{}
+	for rows.Next() {
+		var m models.MutedDomain
+		var enabled int
+		if err := rows.Scan(&m.ID, &m.Pattern, &m.MatchType, &enabled, &m.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan muted domain: %w", err)
+		}
+		m.Enabled = enabled == 1
+		out = append(out, m)
+	}
+	return out, nil
+}
+
+// AddMuted inserts a suffix-match mute for domain (idempotent — re-enables
+// an existing row) and refreshes the cache so ingest applies it at once.
+func (s *TrafficLogService) AddMuted(domain string) (int64, error) {
+	pattern := NormalizeDomain(domain)
+	if pattern == "" {
+		return 0, fmt.Errorf("invalid domain")
+	}
+	var id int64
+	err := s.db.QueryRow(`
+		INSERT INTO muted_domains (pattern, match_type) VALUES (?, 'suffix')
+		ON CONFLICT(pattern) DO UPDATE SET enabled = 1
+		RETURNING id
+	`, pattern).Scan(&id)
+	if err != nil {
+		return 0, fmt.Errorf("insert muted domain: %w", err)
+	}
+	s.RefreshMuteCache()
+	return id, nil
+}
+
+// RemoveMuted deletes a mute pattern and refreshes the cache.
+func (s *TrafficLogService) RemoveMuted(id int64) error {
+	if _, err := s.db.Exec("DELETE FROM muted_domains WHERE id = ?", id); err != nil {
+		return fmt.Errorf("delete muted domain %d: %w", id, err)
+	}
+	s.RefreshMuteCache()
+	return nil
+}
+
+// isIgnored returns true if a traffic event from this MAC or IP should be
+// dropped at INSERT time. Either match wins — DNS events have no MAC, so
+// the IP cache catches them; forward events always carry a MAC.
+func (s *TrafficLogService) isIgnored(mac, ip string) bool {
+	if mac == "" && ip == "" {
+		return false
+	}
+	s.ignoreMu.RLock()
+	defer s.ignoreMu.RUnlock()
+	if mac != "" {
+		if _, ok := s.ignoredMACs[strings.ToLower(strings.TrimSpace(mac))]; ok {
+			return true
+		}
+	}
+	if ip != "" {
+		if _, ok := s.ignoredIPs[strings.TrimSpace(ip)]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// WipeForDevice deletes every query_log row attributable to this device.
+// MAC matches forward (nflog) events; IP matches DNS events (which carry
+// no MAC). Pass the device's last-known IP from the devices row — old IPs
+// from a prior DHCP lease will still leak through, which is acceptable.
+func (s *TrafficLogService) WipeForDevice(mac, ip string) (int64, error) {
+	mac = strings.ToLower(strings.TrimSpace(mac))
+	ip = strings.TrimSpace(ip)
+	if mac == "" && ip == "" {
+		return 0, nil
+	}
+	res, err := s.db.Exec(
+		"DELETE FROM query_log WHERE LOWER(client_mac) = ? OR client_ip = ?",
+		mac, ip,
+	)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
 }
 
 // tailDnsmasqLogFile tails /var/log/dnsmasq.log (the default on Raspberry Pi OS
@@ -309,6 +530,12 @@ func (s *TrafficLogService) insertEntry(e TrafficEntry) {
 	if e.Source == "" {
 		e.Source = "forward"
 	}
+	if s.isIgnored(e.SrcMAC, e.SrcIP) {
+		return
+	}
+	if e.Domain != "" && s.isMuted(e.Domain) {
+		return
+	}
 	_, err := s.db.Exec(`
 		INSERT INTO query_log (timestamp, client_ip, domain, dst_ip, dst_port, protocol, action, client_mac, source, policy)
 		VALUES (CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -392,9 +619,21 @@ func (s *TrafficLogService) QueryPaginated(f TrafficFilter) PagedResult {
 	}
 
 	if f.Query != "" {
-		pattern := "%" + f.Query + "%"
-		where = append(where, "(domain LIKE ? OR client_ip LIKE ? OR dst_ip LIKE ? OR dst_port LIKE ?)")
-		args = append(args, pattern, pattern, pattern, pattern)
+		if utf8.RuneCountInString(f.Query) >= 3 {
+			// FTS5 trigram path. Wrap the query as a double-quoted FTS5
+			// string literal (internal quotes doubled) so it is matched
+			// as a literal substring across all query_log_fts columns
+			// rather than parsed as FTS query syntax.
+			ftsArg := `"` + strings.ReplaceAll(f.Query, `"`, `""`) + `"`
+			where = append(where, "id IN (SELECT rowid FROM query_log_fts WHERE query_log_fts MATCH ?)")
+			args = append(args, ftsArg)
+		} else {
+			// The trigram tokenizer needs 3-character grams; shorter
+			// queries fall back to an (unindexed) LIKE scan.
+			pattern := "%" + f.Query + "%"
+			where = append(where, "(domain LIKE ? OR client_ip LIKE ? OR dst_ip LIKE ? OR dst_port LIKE ?)")
+			args = append(args, pattern, pattern, pattern, pattern)
+		}
 	}
 
 	if f.From != "" {
@@ -571,9 +810,9 @@ func (s *TrafficLogService) Summary(rangeStr string) StatsSummary {
 	return stats
 }
 
-func (s *TrafficLogService) TopDomains(action, rangeStr string, limit int) []DomainCount {
+func (s *TrafficLogService) TopDomains(action, rangeStr, q string, limit int) []DomainCount {
 	if limit <= 0 {
-		limit = 10
+		limit = 50
 	}
 	where := s.timeWhereClause(rangeStr)
 
@@ -587,6 +826,14 @@ func (s *TrafficLogService) TopDomains(action, rangeStr string, limit int) []Dom
 	if action != "" && action != "all" {
 		query += " AND action = ?"
 		args = append(args, action)
+	}
+	if q != "" {
+		// Filter against both columns so a search hits whether the row
+		// has a resolved domain (DNS events) or just an IP (some forward
+		// events). Mirrors the LIKE pattern used in QueryPaginated.
+		pattern := "%" + q + "%"
+		query += " AND (domain LIKE ? OR dst_ip LIKE ?)"
+		args = append(args, pattern, pattern)
 	}
 	query += " GROUP BY dest ORDER BY cnt DESC LIMIT ?"
 	args = append(args, limit)

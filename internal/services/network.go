@@ -128,6 +128,7 @@ func (s *NetworkService) upsertDevice(dev *models.Device) {
 func (s *NetworkService) ListDevices() ([]models.Device, error) {
 	rows, err := s.db.Query(`
 		SELECT id, mac_address, ip_address, hostname, alias, first_seen, last_seen, is_blocked,
+			ignore_traffic_log,
 			CASE WHEN last_seen > datetime('now', '-5 minutes') THEN 1 ELSE 0 END as online
 		FROM devices ORDER BY last_seen DESC
 	`)
@@ -139,26 +140,42 @@ func (s *NetworkService) ListDevices() ([]models.Device, error) {
 	var devices []models.Device
 	for rows.Next() {
 		var d models.Device
-		var blocked, online int
+		var blocked, ignoreLog, online int
 		if err := rows.Scan(&d.ID, &d.MACAddress, &d.IPAddress, &d.Hostname, &d.Alias,
-			&d.FirstSeen, &d.LastSeen, &blocked, &online); err != nil {
+			&d.FirstSeen, &d.LastSeen, &blocked, &ignoreLog, &online); err != nil {
 			return nil, fmt.Errorf("scan device: %w", err)
 		}
 		d.IsBlocked = blocked == 1
+		d.IgnoreTrafficLog = ignoreLog == 1
 		d.Online = online == 1
 		devices = append(devices, d)
 	}
 	return devices, nil
 }
 
-func (s *NetworkService) UpdateDevice(mac, alias string, blocked bool) error {
+// DeviceIPByMAC returns the device's last-known IP, or "" if no row exists.
+// Used by the traffic-log wipe to also delete DNS rows tagged by client_ip
+// (DNS events don't carry a MAC).
+func (s *NetworkService) DeviceIPByMAC(mac string) string {
+	var ip string
+	if err := s.db.QueryRow("SELECT ip_address FROM devices WHERE mac_address = ?", mac).Scan(&ip); err != nil {
+		return ""
+	}
+	return ip
+}
+
+func (s *NetworkService) UpdateDevice(mac, alias string, blocked, ignoreTrafficLog bool) error {
 	blockedInt := 0
 	if blocked {
 		blockedInt = 1
 	}
+	ignoreInt := 0
+	if ignoreTrafficLog {
+		ignoreInt = 1
+	}
 	_, err := s.db.Exec(
-		"UPDATE devices SET alias = ?, is_blocked = ? WHERE mac_address = ?",
-		alias, blockedInt, mac,
+		"UPDATE devices SET alias = ?, is_blocked = ?, ignore_traffic_log = ? WHERE mac_address = ?",
+		alias, blockedInt, ignoreInt, mac,
 	)
 	if err != nil {
 		return fmt.Errorf("update device %s: %w", mac, err)
