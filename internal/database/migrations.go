@@ -364,6 +364,47 @@ var migrations = []string{
 	// thousands of DNS lookups per minute) so the traffic monitor stays
 	// useful for spotting anomalies on locked-down devices.
 	`ALTER TABLE devices ADD COLUMN ignore_traffic_log INTEGER NOT NULL DEFAULT 0;`,
+
+	// v12: traffic-monitor search index. The monitor's substring search
+	// was a 4x leading-wildcard LIKE over query_log — unindexable, so a
+	// full table scan (~3.6s on a 100k+ row table). An FTS5 virtual table
+	// with the trigram tokenizer makes substring MATCH sub-100ms at any
+	// table size. content='query_log' keeps it external (index only, no
+	// data copy); triggers keep it in sync. query_log rows are only ever
+	// inserted or deleted (never updated), so no AFTER UPDATE trigger.
+	// The final INSERT...SELECT backfills the existing rows.
+	`CREATE INDEX IF NOT EXISTS idx_query_log_action ON query_log(action);
+
+	CREATE VIRTUAL TABLE IF NOT EXISTS query_log_fts USING fts5(
+		domain, dst_ip, client_ip, dst_port,
+		content='query_log', content_rowid='id', tokenize='trigram'
+	);
+
+	CREATE TRIGGER IF NOT EXISTS query_log_fts_ai AFTER INSERT ON query_log BEGIN
+		INSERT INTO query_log_fts(rowid, domain, dst_ip, client_ip, dst_port)
+		VALUES (new.id, new.domain, new.dst_ip, new.client_ip, new.dst_port);
+	END;
+
+	CREATE TRIGGER IF NOT EXISTS query_log_fts_ad AFTER DELETE ON query_log BEGIN
+		INSERT INTO query_log_fts(query_log_fts, rowid, domain, dst_ip, client_ip, dst_port)
+		VALUES ('delete', old.id, old.domain, old.dst_ip, old.client_ip, old.dst_port);
+	END;
+
+	INSERT INTO query_log_fts(rowid, domain, dst_ip, client_ip, dst_port)
+	SELECT id, domain, dst_ip, client_ip, dst_port FROM query_log;`,
+
+	// v13: muted domains — patterns whose traffic events are dropped at
+	// ingest (never written to query_log), to keep the monitor readable
+	// when a device spams repetitive lookups. Distinct from blocked_domains
+	// (firewall/DNS deny): muting only suppresses logging, it changes no
+	// network behaviour. Same exact/suffix match shape as blocked_domains.
+	`CREATE TABLE IF NOT EXISTS muted_domains (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		pattern TEXT NOT NULL UNIQUE,
+		match_type TEXT NOT NULL DEFAULT 'suffix' CHECK(match_type IN ('exact','suffix')),
+		enabled INTEGER DEFAULT 1,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);`,
 }
 
 func Migrate(db *sql.DB) error {

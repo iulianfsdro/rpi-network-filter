@@ -1,8 +1,11 @@
 package handlers
 
 import (
+	"encoding/json"
 	"net/http"
 	"strconv"
+
+	"github.com/go-chi/chi/v5"
 
 	"github.com/iulianfsdro/rpi-network-filter/internal/services"
 )
@@ -63,6 +66,50 @@ func (h *SystemHandler) ClearTrafficLog(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	h.audit.Log("traffic.clear", "user cleared traffic log")
+	JSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// MutedList returns the muted-domain patterns (events dropped at ingest).
+func (h *SystemHandler) MutedList(w http.ResponseWriter, r *http.Request) {
+	muted, err := h.trafficLog.ListMuted()
+	if err != nil {
+		JSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	JSON(w, http.StatusOK, muted)
+}
+
+// MutedAdd mutes a domain (suffix match) so its events stop being logged.
+func (h *SystemHandler) MutedAdd(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Domain string `json:"domain"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		JSONError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	id, err := h.trafficLog.AddMuted(req.Domain)
+	if err != nil {
+		JSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	h.audit.Log("traffic.mute", "domain="+req.Domain)
+	JSON(w, http.StatusOK, map[string]int64{"id": id})
+}
+
+// MutedRemove un-mutes a pattern; its events resume being logged.
+func (h *SystemHandler) MutedRemove(w http.ResponseWriter, r *http.Request) {
+	raw := chi.URLParam(r, "id")
+	id, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		JSONError(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	if err := h.trafficLog.RemoveMuted(id); err != nil {
+		JSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	h.audit.Log("traffic.unmute", "id="+raw)
 	JSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
