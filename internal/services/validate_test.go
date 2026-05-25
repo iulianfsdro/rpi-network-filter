@@ -2,29 +2,30 @@ package services
 
 import "testing"
 
-func TestValidPolicyName(t *testing.T) {
+func TestValidPresetName(t *testing.T) {
 	cases := []struct {
 		in   string
 		want bool
 	}{
-		{"Tesla", true},
-		{"Default", true},
-		{"Open", true},
+		{"Tesla AP/Nav", true}, // '/' allowed for service names
+		{"Disney+", true},      // '+' allowed
+		{"YouTube", true},
+		{"Netflix", true},
 		{"Kids tablet", true},
-		{"policy_1", true},
+		{"preset_1", true},
 		{"a-b-c", true},
 		{"", false},
 		{" leading", false},
 		{"-dash-start", false},
 		{"has\nnewline", false},
 		{`has"quote`, false},
-		{"drop] drop", false},              // nft log-prefix injection
-		{"policy;drop table", false},        // SQL-adjacent junk
-		{string(make([]byte, 65)), false},   // too long
+		{"drop] drop", false},             // nft log-prefix injection
+		{"preset;drop table", false},      // SQL-adjacent junk
+		{string(make([]byte, 65)), false}, // too long
 	}
 	for _, c := range cases {
-		if got := ValidPolicyName(c.in); got != c.want {
-			t.Errorf("ValidPolicyName(%q) = %v, want %v", c.in, got, c.want)
+		if got := ValidPresetName(c.in); got != c.want {
+			t.Errorf("ValidPresetName(%q) = %v, want %v", c.in, got, c.want)
 		}
 	}
 }

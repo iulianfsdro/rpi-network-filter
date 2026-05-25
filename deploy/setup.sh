@@ -115,11 +115,16 @@ info "Freeing port 53 from systemd-resolved..."
 if systemctl list-unit-files systemd-resolved.service &>/dev/null; then
     systemctl disable --now systemd-resolved 2>/dev/null || true
 fi
-# Replace the symlinked resolv.conf with a static one pointing at our dnsmasq.
+# Replace the symlinked resolv.conf with a static one pointing AT the
+# public resolvers directly — NOT through dnsmasq. The Pi's own processes
+# (apt, curl, etc.) need a working resolver, but dnsmasq runs default-
+# deny for LAN clients and would NXDOMAIN every Pi query if 127.0.0.1
+# were first in the list. LAN clients still query dnsmasq via DHCP-pushed
+# DNS = the Pi's wlan0 IP; this resolv.conf is only consulted by the Pi
+# itself.
 if [[ -L /etc/resolv.conf ]] || [[ ! -s /etc/resolv.conf ]]; then
     rm -f /etc/resolv.conf
     cat > /etc/resolv.conf << 'RESOLV'
-nameserver 127.0.0.1
 nameserver 1.1.1.1
 nameserver 8.8.8.8
 RESOLV

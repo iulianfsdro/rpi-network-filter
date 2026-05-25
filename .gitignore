@@ -1,11 +1,15 @@
 /netfilterd
 /netfilterd-arm64
 /netfilterd.exe
+/preview
 *.db
 *.db-wal
 *.db-shm
 *.crt
 *.key
+
+# macOS Finder metadata
+.DS_Store
 
 # Local-only scratch files (deploy notes, probes, SSH setup)
 ssh_setup.txt

@@ -47,13 +47,14 @@ func (h *SystemHandler) TrafficLog(w http.ResponseWriter, r *http.Request) {
 	perPage, _ := strconv.Atoi(q.Get("per_page"))
 
 	filter := services.TrafficFilter{
-		Page:    page,
-		PerPage: perPage,
-		Action:  q.Get("action"),
-		Query:   q.Get("q"),
-		From:    q.Get("from"),
-		To:      q.Get("to"),
-		Source:  q.Get("source"),
+		Page:     page,
+		PerPage:  perPage,
+		Action:   q.Get("action"),
+		Query:    q.Get("q"),
+		From:     q.Get("from"),
+		To:       q.Get("to"),
+		Source:   q.Get("source"),
+		Protocol: q.Get("protocol"),
 	}
 
 	result := h.trafficLog.QueryPaginated(filter)

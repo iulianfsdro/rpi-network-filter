@@ -70,7 +70,7 @@ FIRSTRUN="$BOOT/firstrun.sh"
 
 if [[ -f "$USER_DATA" ]]; then
     echo "Injecting provisioning hook into $USER_DATA (cloud-init)"
-    python - "$USER_DATA" <<'PY'
+    python3 - "$USER_DATA" <<'PY'
 import sys, pathlib
 p = pathlib.Path(sys.argv[1])
 src = p.read_text()
@@ -97,7 +97,7 @@ elif [[ -f "$FIRSTRUN" ]]; then
         echo "firstrun.sh already hooked; skipping injection."
     else
         echo "Injecting provisioning hook into $FIRSTRUN"
-        python - "$FIRSTRUN" <<'PY'
+        python3 - "$FIRSTRUN" <<'PY'
 import sys, pathlib
 p = pathlib.Path(sys.argv[1])
 src = p.read_text()

@@ -21,6 +21,7 @@ type Config struct {
 	DHCPRangeStart string `yaml:"dhcp_range_start"`
 	DHCPRangeEnd   string `yaml:"dhcp_range_end"`
 	DNSUpstream   string `yaml:"dns_upstream"`
+	SNIProxyPort  int    `yaml:"sni_proxy_port"`
 	DryRun        bool   `yaml:"dry_run"`
 	LogLevel      string `yaml:"log_level"`
 }
@@ -39,6 +40,7 @@ func Defaults() Config {
 		DHCPRangeStart: "192.168.4.100",
 		DHCPRangeEnd:   "192.168.4.250",
 		DNSUpstream:    "1.1.1.1,8.8.8.8",
+		SNIProxyPort:   8444,
 		DryRun:         false,
 		LogLevel:       "info",
 	}

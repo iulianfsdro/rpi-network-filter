@@ -247,6 +247,23 @@ func (s *TrafficLogService) RemoveMuted(id int64) error {
 	return nil
 }
 
+// CountByActionSince returns the number of query_log rows with the given
+// action recorded since the cutoff. Used by the dashboard handler's
+// Guardian hero ("Outbound dropped · 24 h" / "Allow-listed · 24 h").
+// Errors are folded to 0 — the hero is glanceable, not authoritative,
+// and a failed count must not break the page render.
+func (s *TrafficLogService) CountByActionSince(action string, since time.Time) int {
+	var n int
+	err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM query_log WHERE action = ? AND timestamp >= ?`,
+		action, since.UTC().Format("2006-01-02 15:04:05"),
+	).Scan(&n)
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
 // isIgnored returns true if a traffic event from this MAC or IP should be
 // dropped at INSERT time. Either match wins — DNS events have no MAC, so
 // the IP cache catches them; forward events always carry a MAC.
@@ -526,6 +543,25 @@ func (s *TrafficLogService) parseDnsLine(message, realtimeTS string) {
 	}
 }
 
+// LogSNIEvent records an SNI proxy allow/deny decision in query_log so the
+// traffic monitor shows the real hostname a device's HTTPS connection
+// requested. Routed through insertEntry, so per-device ignore and muted
+// domains are honoured.
+func (s *TrafficLogService) LogSNIEvent(clientIP, sni string, allowed bool) {
+	action := "blocked"
+	if allowed {
+		action = "allowed"
+	}
+	s.insertEntry(TrafficEntry{
+		SrcIP:    clientIP,
+		Domain:   sni,
+		DstPort:  "443",
+		Protocol: "TLS",
+		Action:   action,
+		Source:   "forward",
+	})
+}
+
 func (s *TrafficLogService) insertEntry(e TrafficEntry) {
 	if e.Source == "" {
 		e.Source = "forward"
@@ -585,7 +621,7 @@ type PagedResult struct {
 	PerPage int            `json:"per_page"`
 }
 
-// TrafficFilter holds pagination + filter options
+// TrafficFilter holds pagination + filter options.
 type TrafficFilter struct {
 	Page    int
 	PerPage int
@@ -594,6 +630,13 @@ type TrafficFilter struct {
 	From    string // ISO datetime
 	To      string // ISO datetime
 	Source  string // "dns" | "forward" | "" (any)
+
+	// Protocol filters by the upper-cased protocol token written into
+	// query_log.protocol. Real values observed: "DNS" (dns events),
+	// "TLS" (SNI proxy splice/drop), "TCP" (other forward TCP), "UDP"
+	// (forward UDP — mostly QUIC drops). Case-insensitive comparison so
+	// the URL param can be lower-case for niceness.
+	Protocol string
 }
 
 // QueryPaginated returns a page of query_log entries matching the filter.
@@ -616,6 +659,11 @@ func (s *TrafficLogService) QueryPaginated(f TrafficFilter) PagedResult {
 	if f.Source != "" && f.Source != "all" {
 		where = append(where, "COALESCE(source,'forward') = ?")
 		args = append(args, f.Source)
+	}
+
+	if f.Protocol != "" && strings.ToLower(f.Protocol) != "all" {
+		where = append(where, "UPPER(COALESCE(protocol,'')) = ?")
+		args = append(args, strings.ToUpper(f.Protocol))
 	}
 
 	if f.Query != "" {
