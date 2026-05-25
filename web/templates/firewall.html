@@ -1,116 +1,147 @@
-{{define "title"}}Firewall Rules{{end}}
+{{define "title"}}Firewall{{end}}
 
 {{define "content"}}
 <div x-data="firewallApp()" x-init="load()">
-    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem;">
-        <p style="margin:0; color:var(--pico-muted-color);">
-            Default policy: <strong style="color:var(--danger);">DROP</strong> — only allowed rules pass through.
-        </p>
-        <button @click="showAdd = !showAdd">+ Add Rule</button>
+    <div class="page-head">
+        <div>
+            <div class="page-head-eyebrow"><strong>Raw nftables</strong> · escape hatch</div>
+            <h1 class="page-head-title">Firewall</h1>
+            <p class="page-head-sub">
+                Operates at L3/L4. Filters apply on top. Use only when the Filter / Devices model
+                can't express what you need.
+            </p>
+        </div>
+        <div class="page-head-right">
+            <button class="btn primary" @click="showAdd = !showAdd">
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M8 3v10M3 8h10"/></svg>
+                <span x-text="showAdd ? 'Cancel' : 'Add rule'"></span>
+            </button>
+        </div>
+    </div>
+
+    <div class="warn-banner">
+        <strong>Raw mode.</strong> Misuse here can re-admit a protected Tesla endpoint by punching
+        a hole at the IP layer. Audit every change.
     </div>
 
     <!-- Add rule form -->
-    <article x-show="showAdd" x-transition>
-        <header><h5 style="margin:0;">New Firewall Rule</h5></header>
-        <div class="grid">
-            <label>
-                Description
-                <input type="text" x-model="form.description" placeholder="e.g. Allow HTTPS">
-            </label>
-            <label>
-                Direction
-                <select x-model="form.direction">
-                    <option value="forward">Forward (client traffic)</option>
-                    <option value="outbound">Outbound (RPi itself)</option>
-                </select>
-            </label>
+    <div class="card" x-show="showAdd" x-cloak>
+        <div class="card-head">
+            <div>
+                <div class="card-head-title">New rule</div>
+                <div class="card-head-sub">Forward / outbound, with optional source / device pin.</div>
+            </div>
         </div>
-        <div class="grid">
-            <label>
-                Protocol
-                <select x-model="form.protocol">
-                    <option value="tcp">TCP</option>
-                    <option value="udp">UDP</option>
-                    <option value="icmp">ICMP</option>
-                    <option value="all">All</option>
-                </select>
-            </label>
-            <label>
-                Dest Port
-                <input type="text" x-model="form.dest_port" placeholder="e.g. 443 or 80,443">
-            </label>
-            <label>
-                Action
-                <select x-model="form.action">
-                    <option value="accept">Accept</option>
-                    <option value="drop">Drop</option>
-                    <option value="reject">Reject</option>
-                </select>
-            </label>
+        <div class="card-body">
+            <div class="row stretch" style="gap:14px;">
+                <div class="field" style="flex:2;">
+                    <label class="label">Description</label>
+                    <input class="input" x-model="form.description" placeholder="e.g. allow https to specific host">
+                </div>
+                <div class="field" style="flex:1;">
+                    <label class="label">Direction</label>
+                    <select class="select" x-model="form.direction">
+                        <option value="forward">Forward · client traffic</option>
+                        <option value="outbound">Outbound · the Pi itself</option>
+                    </select>
+                </div>
+                <div class="field" style="flex:1;">
+                    <label class="label">Action</label>
+                    <select class="select" x-model="form.action">
+                        <option value="accept">Accept</option>
+                        <option value="drop">Drop</option>
+                        <option value="reject">Reject</option>
+                    </select>
+                </div>
+            </div>
+            <div class="row stretch" style="gap:14px;">
+                <div class="field" style="flex:1;">
+                    <label class="label">Protocol</label>
+                    <select class="select" x-model="form.protocol">
+                        <option value="tcp">TCP</option>
+                        <option value="udp">UDP</option>
+                        <option value="icmp">ICMP</option>
+                        <option value="all">All</option>
+                    </select>
+                </div>
+                <div class="field" style="flex:1;">
+                    <label class="label">Dest port</label>
+                    <input class="input" x-model="form.dest_port" placeholder="443 or 80,443">
+                </div>
+                <div class="field" style="flex:2;">
+                    <label class="label">Dest IP (optional)</label>
+                    <input class="input" x-model="form.dest_ip" placeholder="0.0.0.0/0 or specific IP">
+                </div>
+            </div>
+            <div class="row stretch" style="gap:14px;">
+                <div class="field" style="flex:2;">
+                    <label class="label">Device MAC (optional)</label>
+                    <input class="input" x-model="form.device_mac" placeholder="empty = all devices · aa:bb:cc:dd:ee:ff">
+                </div>
+                <div class="field" style="flex:1;">
+                    <label class="label">Priority</label>
+                    <input class="input" type="number" x-model.number="form.priority" placeholder="100">
+                </div>
+                <div style="display:flex; align-items:flex-end; gap:8px;">
+                    <button class="btn ghost" @click="showAdd = false">Cancel</button>
+                    <button class="btn primary" @click="addRule()">Save rule</button>
+                </div>
+            </div>
         </div>
-        <div class="grid">
-            <label>
-                Dest IP (optional)
-                <input type="text" x-model="form.dest_ip" placeholder="e.g. 0.0.0.0/0 or specific IP">
-            </label>
-            <label>
-                Device MAC (optional, empty = all devices)
-                <input type="text" x-model="form.device_mac" placeholder="e.g. AA:BB:CC:DD:EE:FF">
-            </label>
-            <label>
-                Priority
-                <input type="number" x-model.number="form.priority" value="100">
-            </label>
-        </div>
-        <footer>
-            <button class="outline secondary" @click="showAdd = false">Cancel</button>
-            <button @click="addRule()">Save Rule</button>
-        </footer>
-    </article>
+    </div>
 
-    <!-- Rules table -->
-    <table>
-        <thead>
-            <tr>
-                <th>Enabled</th>
-                <th>Description</th>
-                <th>Direction</th>
-                <th>Protocol</th>
-                <th>Dest Port</th>
-                <th>Dest IP</th>
-                <th>Action</th>
-                <th>Device</th>
-                <th>Actions</th>
-            </tr>
-        </thead>
-        <tbody>
-            <template x-for="r in rules" :key="r.id">
-                <tr>
-                    <td>
-                        <label class="toggle" @click.prevent="toggleRule(r)">
-                            <input type="checkbox" :checked="r.enabled">
-                            <span class="toggle-slider"></span>
-                        </label>
-                    </td>
-                    <td x-text="r.description || '-'"></td>
-                    <td><span class="badge badge-info" x-text="r.direction"></span></td>
-                    <td x-text="r.protocol"></td>
-                    <td><code x-text="r.dest_port || '*'"></code></td>
-                    <td><code x-text="r.dest_ip || '*'"></code></td>
-                    <td>
-                        <span class="badge" :class="r.action === 'accept' ? 'badge-success' : 'badge-danger'" x-text="r.action"></span>
-                    </td>
-                    <td><code x-text="r.device_mac || 'all'" style="font-size:0.8rem;"></code></td>
-                    <td>
-                        <button class="outline btn-sm" style="color:var(--danger);" @click="deleteRule(r.id)">Delete</button>
-                    </td>
-                </tr>
-            </template>
-        </tbody>
-    </table>
-    <p x-show="rules.length === 0" style="text-align:center; color:var(--pico-muted-color);">
-        No rules yet. All client internet traffic is blocked by default. Add accept rules to allow specific traffic.
-    </p>
+    <div class="card">
+        <div class="card-head">
+            <div>
+                <div class="card-head-title">Active chain · forward</div>
+                <div class="card-head-sub">Policy DROP · <span x-text="rules.length"></span> rules</div>
+            </div>
+        </div>
+        <div class="card-body tight">
+            <table class="tbl">
+                <thead>
+                    <tr>
+                        <th style="width:60px;">On</th>
+                        <th>Description</th>
+                        <th style="width:100px;">Dir</th>
+                        <th style="width:80px;">Proto</th>
+                        <th style="width:90px;">Port</th>
+                        <th>Dst</th>
+                        <th style="width:100px;">Action</th>
+                        <th style="width:70px;">Prio</th>
+                        <th class="right" style="width:110px;"></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <template x-for="r in rules" :key="r.id">
+                        <tr>
+                            <td>
+                                <label class="toggle">
+                                    <input type="checkbox" :checked="r.enabled" @change="toggleRule(r)">
+                                    <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                                </label>
+                            </td>
+                            <td><span class="cell-primary" x-text="r.description || '—'"></span><div class="cell-sub" x-show="r.device_mac" x-text="'MAC ' + r.device_mac"></div></td>
+                            <td class="cell-mac" x-text="r.direction"></td>
+                            <td class="cell-mac" x-text="r.protocol"></td>
+                            <td class="cell-mac" x-text="r.dest_port || '*'"></td>
+                            <td class="cell-mac" x-text="r.dest_ip || '*'"></td>
+                            <td><span class="badge" :class="r.action === 'accept' ? 'success' : 'danger'" x-text="r.action"></span></td>
+                            <td class="cell-mac" x-text="r.priority"></td>
+                            <td class="actions">
+                                <button class="btn-icon danger" @click="deleteRule(r.id)" title="Delete">
+                                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 3l10 10M13 3L3 13"/></svg>
+                                </button>
+                            </td>
+                        </tr>
+                    </template>
+                    <template x-if="rules.length === 0">
+                        <tr><td colspan="9" style="text-align:center; color:var(--fg-mute); padding:22px;">No rules yet. Default policy is DROP — add accept rules only when the Filter model can't cover it.</td></tr>
+                    </template>
+                </tbody>
+            </table>
+        </div>
+    </div>
 </div>
 {{end}}
 
@@ -122,41 +153,33 @@ function firewallApp() {
         showAdd: false,
         form: { description: '', direction: 'forward', protocol: 'tcp', dest_port: '', dest_ip: '', action: 'accept', device_mac: '', enabled: true, priority: 100 },
         async load() {
-            this.rules = await api.get('/api/firewall/rules');
+            this.rules = (await api.get('/api/firewall/rules')) || [];
         },
         async addRule() {
-            await api.post('/api/firewall/rules', this.form);
-            notify('Rule added', 'success');
-            this.showAdd = false;
-            this.form = { description: '', direction: 'forward', protocol: 'tcp', dest_port: '', dest_ip: '', action: 'accept', device_mac: '', enabled: true, priority: 100 };
-            this.load();
+            try {
+                await api.post('/api/firewall/rules', this.form);
+                notify('Rule added', 'success');
+                this.showAdd = false;
+                this.form = { description: '', direction: 'forward', protocol: 'tcp', dest_port: '', dest_ip: '', action: 'accept', device_mac: '', enabled: true, priority: 100 };
+                this.load();
+            } catch(e) {}
         },
         async toggleRule(r) {
-            // Optimistic update
             r.enabled = !r.enabled;
             try {
-                await api.put('/api/firewall/rules/' + r.id, {
-                    description: r.description,
-                    direction: r.direction,
-                    protocol: r.protocol,
-                    source_ip: r.source_ip,
-                    dest_ip: r.dest_ip,
-                    dest_port: r.dest_port,
-                    action: r.action,
-                    device_mac: r.device_mac,
-                    enabled: r.enabled,
-                    priority: r.priority
-                });
+                await api.put('/api/firewall/rules/' + r.id, r);
                 notify(r.enabled ? 'Rule enabled' : 'Rule disabled', 'success');
             } catch(e) {
-                r.enabled = !r.enabled; // rollback on error
+                r.enabled = !r.enabled;
             }
         },
         async deleteRule(id) {
             if (!confirm('Delete this rule?')) return;
-            await api.delete('/api/firewall/rules/' + id);
-            notify('Rule deleted', 'success');
-            this.load();
+            try {
+                await api.delete('/api/firewall/rules/' + id);
+                notify('Rule deleted', 'success');
+                this.load();
+            } catch(e) {}
         }
     };
 }

@@ -2,7 +2,6 @@ package handlers
 
 import (
 	"encoding/json"
-	"errors"
 	"net/http"
 	"strconv"
 
@@ -14,7 +13,6 @@ import (
 
 type FirewallHandler struct {
 	firewall *services.FirewallService
-	policy   *services.PolicyService
 	audit    *services.AuditService
 	renderer *Renderer
 }
@@ -22,7 +20,6 @@ type FirewallHandler struct {
 func NewFirewallHandler(svc *services.Services, renderer *Renderer) *FirewallHandler {
 	return &FirewallHandler{
 		firewall: svc.Firewall,
-		policy:   svc.Policy,
 		audit:    svc.Audit,
 		renderer: renderer,
 	}
@@ -32,111 +29,7 @@ func (h *FirewallHandler) Page(w http.ResponseWriter, r *http.Request) {
 	h.renderer.RenderPage(w, "firewall.html", map[string]string{"page": "firewall"})
 }
 
-func (h *FirewallHandler) AllowListPage(w http.ResponseWriter, r *http.Request) {
-	h.renderer.RenderPage(w, "allowlist.html", map[string]string{"page": "allowlist"})
-}
-
-// Allowed domains CRUD
-
-func (h *FirewallHandler) ListAllowedDomains(w http.ResponseWriter, r *http.Request) {
-	domains, err := h.firewall.ListAllowedDomains()
-	if err != nil {
-		JSONError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	if domains == nil {
-		domains = []models.AllowedDomain{}
-	}
-	JSON(w, http.StatusOK, domains)
-}
-
-func (h *FirewallHandler) CreateAllowedDomain(w http.ResponseWriter, r *http.Request) {
-	var d models.AllowedDomain
-	if err := json.NewDecoder(r.Body).Decode(&d); err != nil {
-		JSONError(w, http.StatusBadRequest, "invalid request body")
-		return
-	}
-	if d.Domain == "" {
-		JSONError(w, http.StatusBadRequest, "domain is required")
-		return
-	}
-	if !d.Enabled {
-		d.Enabled = true // default
-	}
-
-	id, err := h.firewall.CreateAllowedDomain(d)
-	if err != nil {
-		if errors.Is(err, services.ErrDomainBlocked) {
-			JSONError(w, http.StatusConflict, err.Error())
-			return
-		}
-		JSONError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	h.audit.Log("allowlist.create", d.Domain)
-	// Resolve before Apply so the nft set is populated immediately.
-	h.policy.ResolveDomain(d.Domain)
-	if err := h.firewall.Apply(); err != nil {
-		JSONError(w, http.StatusInternalServerError, "saved but failed to apply: "+err.Error())
-		return
-	}
-	JSON(w, http.StatusCreated, map[string]any{"id": id})
-}
-
-func (h *FirewallHandler) UpdateAllowedDomain(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
-	if err != nil {
-		JSONError(w, http.StatusBadRequest, "invalid id")
-		return
-	}
-
-	var d models.AllowedDomain
-	if err := json.NewDecoder(r.Body).Decode(&d); err != nil {
-		JSONError(w, http.StatusBadRequest, "invalid request body")
-		return
-	}
-
-	if err := h.firewall.UpdateAllowedDomain(id, d); err != nil {
-		JSONError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	h.audit.Log("allowlist.update", d.Domain)
-	if err := h.firewall.Apply(); err != nil {
-		JSONError(w, http.StatusInternalServerError, "updated but failed to apply: "+err.Error())
-		return
-	}
-	JSON(w, http.StatusOK, map[string]string{"status": "ok"})
-}
-
-func (h *FirewallHandler) DeleteAllowedDomain(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
-	if err != nil {
-		JSONError(w, http.StatusBadRequest, "invalid id")
-		return
-	}
-
-	if err := h.firewall.DeleteAllowedDomain(id); err != nil {
-		JSONError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	h.audit.Log("allowlist.delete", "id="+chi.URLParam(r, "id"))
-	if err := h.firewall.Apply(); err != nil {
-		JSONError(w, http.StatusInternalServerError, "deleted but failed to apply: "+err.Error())
-		return
-	}
-	JSON(w, http.StatusOK, map[string]string{"status": "ok"})
-}
-
-func (h *FirewallHandler) AllowedDomainIPs(w http.ResponseWriter, r *http.Request) {
-	ips := h.firewall.ListActiveSetIPs()
-	if ips == nil {
-		ips = []string{}
-	}
-	JSON(w, http.StatusOK, ips)
-}
+// ── Firewall rules CRUD (the /firewall manual-rules page) ──────
 
 func (h *FirewallHandler) List(w http.ResponseWriter, r *http.Request) {
 	rules, err := h.firewall.ListRules()

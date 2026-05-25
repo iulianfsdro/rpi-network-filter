@@ -2,81 +2,145 @@
 
 {{define "content"}}
 <div x-data="devicesApp()" x-init="load()">
-    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem;">
-        <p style="margin:0; color:var(--pico-muted-color);">
-            <span x-text="devices.filter(d => d.online).length"></span> online /
-            <span x-text="devices.length"></span> total
-        </p>
-        <button class="outline btn-sm" @click="load()">Refresh</button>
+    <div class="page-head">
+        <div>
+            <div class="page-head-eyebrow"><strong>Roster</strong> · <span x-text="onlineCount"></span> online of <span x-text="devices.length"></span> total</div>
+            <h1 class="page-head-title">Devices</h1>
+            <p class="page-head-sub">
+                New devices land as <strong style="color:var(--danger);">Blocked</strong>. Promote to
+                <strong>Filtered</strong> (SNI-gated by enabled filters) or
+                <strong style="color:var(--ok);">Open</strong> (full passthrough). The Tesla is highlighted —
+                it's the reason this exists.
+            </p>
+        </div>
+        <div class="page-head-right">
+            <button class="btn" @click="load()">
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M14 8a6 6 0 1 0-2 4.5"/><path d="M14 3v4h-4"/></svg>
+                Refresh
+            </button>
+        </div>
     </div>
 
-    <table>
-        <thead>
-            <tr>
-                <th>Status</th>
-                <th>Name</th>
-                <th>MAC Address</th>
-                <th>IP Address</th>
-                <th>Policy</th>
-                <th>Blocked</th>
-                <th>Actions</th>
-            </tr>
-        </thead>
-        <tbody>
-            <template x-for="d in devices" :key="d.mac_address">
-                <tr>
-                    <td>
-                        <span x-show="d.online" class="badge badge-success">Online</span>
-                        <span x-show="!d.online" class="badge badge-muted">Offline</span>
-                    </td>
-                    <td>
-                        <strong x-text="d.alias || d.hostname || 'Unknown'"></strong>
-                        <br x-show="d.alias && d.hostname">
-                        <small x-show="d.alias && d.hostname" x-text="d.hostname" style="color:var(--pico-muted-color);"></small>
-                    </td>
-                    <td><code x-text="d.mac_address" style="font-size:0.85rem;"></code></td>
-                    <td x-text="d.ip_address || '-'"></td>
-                    <td>
-                        <select :value="policyByMAC[d.mac_address.toLowerCase()] || ''"
-                                @change="setPolicy(d, $event.target.value)"
-                                style="padding:0.25rem 0.4rem; font-size:0.85rem; min-width:140px;">
-                            <option value="">Default (inherited)</option>
-                            <template x-for="p in policies" :key="p.id">
-                                <option :value="p.id" x-text="p.name + (p.mode === 'strict' ? ' (strict)' : '')"></option>
-                            </template>
-                        </select>
-                    </td>
-                    <td>
-                        <label class="toggle" @click.prevent="toggleBlock(d)">
-                            <input type="checkbox" :checked="d.is_blocked">
-                            <span class="toggle-slider"></span>
-                        </label>
-                    </td>
-                    <td>
-                        <button class="outline btn-sm" @click="editDevice(d)">Edit</button>
-                    </td>
-                </tr>
-            </template>
-        </tbody>
-    </table>
+    <div class="card" style="overflow:visible;">
+        <div class="card-head">
+            <div>
+                <div class="card-head-title">Lease table</div>
+                <div class="card-head-sub" x-text="'Last ARP sweep · just now · ' + devices.length + ' entries'"></div>
+            </div>
+            <span class="card-head-spacer"></span>
+            <span class="badge danger" x-text="counts.blocked + ' blocked'"></span>
+            <span class="badge info"   x-text="counts.filtered + ' filtered'"></span>
+            <span class="badge success" x-text="counts.open + ' open'"></span>
+        </div>
+        <div class="card-body tight">
+            <table class="tbl">
+                <thead>
+                    <tr>
+                        <th>Device</th>
+                        <th style="width:110px;">Online</th>
+                        <th style="width:170px;">MAC</th>
+                        <th style="width:140px;">IP</th>
+                        <th style="width:160px;">Traffic</th>
+                        <th style="width:80px;" title="Off = traffic events from this device are dropped before they hit query_log. Firewall rules still apply.">Log</th>
+                        <th style="width:80px;" class="right"></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <template x-for="d in devices" :key="d.mac_address">
+                        <tr :class="(isTesla(d) ? 'row-tesla ' : '') + 'clickable'" @click="editDevice(d)">
+                            <td>
+                                <div class="dev-row">
+                                    <div class="dev-avatar" :class="isTesla(d) ? 'tesla' : ''" x-text="avatarLetter(d)"></div>
+                                    <div>
+                                        <div class="dev-row-name" x-text="d.alias || d.hostname || 'Unknown device'"></div>
+                                        <div class="dev-row-sub">
+                                            <template x-if="isTesla(d)">
+                                                <span style="color:var(--danger);">● Vehicle · protected target</span>
+                                            </template>
+                                            <template x-if="!isTesla(d)">
+                                                <span x-text="(d.alias && d.hostname) ? '↳ ' + d.hostname : (d.hostname ? '' : '↳ unrecognised')"></span>
+                                            </template>
+                                        </div>
+                                    </div>
+                                </div>
+                            </td>
+                            <td>
+                                <template x-if="d.online"><span class="badge success dot">Online</span></template>
+                                <template x-if="!d.online"><span class="badge muted dot">Offline</span></template>
+                            </td>
+                            <td class="cell-mac" x-text="d.mac_address"></td>
+                            <td class="cell-mac" x-text="d.ip_address || '—'"></td>
+                            <td @click.stop>
+                                <span class="status-pill" :class="d.status">
+                                    <span class="status-pill-dot"></span>
+                                    <span class="status-pill-label" x-text="statusLabel(d.status)"></span>
+                                    <span class="status-pill-chev">
+                                        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6l4 4 4-4"/></svg>
+                                    </span>
+                                    <select :value="d.status" @change="setStatus(d, $event.target.value)">
+                                        <option value="blocked">Blocked</option>
+                                        <option value="filtered">Filtered</option>
+                                        <option value="open">Open</option>
+                                    </select>
+                                </span>
+                            </td>
+                            <td @click.stop>
+                                <label class="toggle" :title="d.ignore_traffic_log ? 'Logging suppressed' : 'Logging on'">
+                                    <input type="checkbox" :checked="!d.ignore_traffic_log" @change="toggleLog(d)">
+                                    <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                                </label>
+                            </td>
+                            <td class="actions">
+                                <button class="btn-icon danger" @click.stop="deleteDevice(d)" title="Forget device — it returns as Blocked if it reconnects">
+                                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 3l10 10M13 3L3 13"/></svg>
+                                </button>
+                                <span class="row-chev" aria-hidden="true">
+                                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 4l4 4-4 4"/></svg>
+                                </span>
+                            </td>
+                        </tr>
+                    </template>
+                    <template x-if="devices.length === 0">
+                        <tr><td colspan="7" style="text-align:center; color:var(--fg-mute); padding:32px;">No devices yet — connect something to the hotspot and it'll appear here as Blocked.</td></tr>
+                    </template>
+                </tbody>
+            </table>
+        </div>
+    </div>
 
-    <dialog id="edit-dialog">
-        <article>
-            <header><h5 style="margin:0;">Edit Device</h5></header>
-            <label>
-                Alias
-                <input type="text" x-model="editForm.alias" placeholder="e.g. My Phone">
-            </label>
-            <label>
-                <input type="checkbox" x-model="editForm.is_blocked">
-                Block all traffic
-            </label>
-            <footer style="display:flex; gap:0.5rem; justify-content:flex-end;">
-                <button class="outline secondary" @click="closeEdit()">Cancel</button>
-                <button @click="saveDevice()">Save</button>
-            </footer>
-        </article>
-    </dialog>
+    <!-- Edit dialog -->
+    <div class="dialog-back" x-show="editing" x-cloak @click.self="closeEdit()">
+        <div class="dialog">
+            <div class="dialog-head">
+                <div class="dialog-title">Edit device · <code x-text="editForm.mac"></code></div>
+                <button class="dialog-close" @click="closeEdit()">
+                    <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 3l10 10M13 3L3 13"/></svg>
+                </button>
+            </div>
+            <div class="dialog-body">
+                <div class="field">
+                    <label class="label">Alias</label>
+                    <input class="input" type="text" x-model="editForm.alias" placeholder="e.g. Tesla M3 — Garage">
+                    <div class="field-help">Overrides the DHCP hostname in displays.</div>
+                </div>
+                <div class="field">
+                    <label class="label">Ignore traffic logs</label>
+                    <div class="row">
+                        <label class="toggle danger">
+                            <input type="checkbox" x-model="editForm.ignore_traffic_log">
+                            <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                        </label>
+                        <span style="font-size:12.5px; color:var(--fg-dim);" x-text="editForm.ignore_traffic_log ? 'Logs suppressed' : 'Logging active'"></span>
+                    </div>
+                    <div class="field-help">Drops events from the traffic monitor before insert (firewall rules unaffected). Enabling <strong>wipes</strong> existing history for this device.</div>
+                </div>
+            </div>
+            <div class="dialog-foot">
+                <button class="btn ghost" @click="closeEdit()">Cancel</button>
+                <button class="btn primary" @click="saveDevice()">Save</button>
+            </div>
+        </div>
+    </div>
 </div>
 {{end}}
 
@@ -85,62 +149,93 @@
 function devicesApp() {
     return {
         devices: [],
-        policies: [],
-        policyByMAC: {}, // mac (lowercase) → policy_id
-        editForm: { mac: '', alias: '', is_blocked: false },
+        editing: false,
+        editForm: { mac: '', alias: '', ignore_traffic_log: false },
+
+        get onlineCount() { return this.devices.filter(d => d.online).length; },
+        get counts() {
+            return {
+                blocked:  this.devices.filter(d => d.status === 'blocked').length,
+                filtered: this.devices.filter(d => d.status === 'filtered').length,
+                open:     this.devices.filter(d => d.status === 'open').length,
+            };
+        },
+
+        isTesla(d) {
+            return /tesla/i.test(d.alias || '') || /tesla/i.test(d.hostname || '');
+        },
+        avatarLetter(d) {
+            if (this.isTesla(d)) return 'T';
+            const s = (d.alias || d.hostname || '?').trim();
+            return s ? s[0].toUpperCase() : '?';
+        },
+        statusLetter(s) { return s === 'blocked' ? 'B' : s === 'filtered' ? 'F' : s === 'open' ? 'O' : '?'; },
+        statusLabel(s)  { return s === 'blocked' ? 'Blocked' : s === 'filtered' ? 'Filtered' : s === 'open' ? 'Open' : 'Unknown'; },
 
         async load() {
-            this.devices  = await api.get('/api/devices') || [];
-            this.policies = await api.get('/api/policies') || [];
-            const assignments = await api.get('/api/policies/assignments') || [];
-            this.policyByMAC = {};
-            for (const a of assignments) {
-                this.policyByMAC[a.device_mac.toLowerCase()] = a.policy_id;
+            this.devices = (await api.get('/api/devices')) || [];
+            // Pin Tesla(s) to the top.
+            this.devices.sort((a, b) => (this.isTesla(b) ? 1 : 0) - (this.isTesla(a) ? 1 : 0));
+        },
+
+        async setStatus(d, status) {
+            const prev = d.status;
+            d.status = status;
+            try {
+                await api.put('/api/devices/' + encodeURIComponent(d.mac_address) + '/status', { status });
+                notify((d.alias || d.mac_address) + ' → ' + status, 'success');
+            } catch(e) { d.status = prev; }
+        },
+
+        async toggleLog(d) {
+            const turningOff = !d.ignore_traffic_log;
+            if (turningOff && !confirm(
+                'Stop logging traffic from "' + (d.alias || d.hostname || d.mac_address) + '" and wipe its existing history from the traffic monitor?\n\nFirewall rules will continue to apply unchanged.'
+            )) {
+                this.load(); return;
+            }
+            d.ignore_traffic_log = !d.ignore_traffic_log;
+            try {
+                await api.put('/api/devices/' + encodeURIComponent(d.mac_address), {
+                    alias: d.alias || '',
+                    ignore_traffic_log: !!d.ignore_traffic_log,
+                });
+                notify(d.ignore_traffic_log ? 'Traffic logging suppressed; history wiped' : 'Traffic logging resumed', 'success');
+            } catch(e) {
+                d.ignore_traffic_log = !d.ignore_traffic_log;
             }
         },
-        async setPolicy(d, policyID) {
-            const mac = d.mac_address;
+
+        async deleteDevice(d) {
+            const label = d.alias || d.hostname || d.mac_address;
+            if (!confirm('Forget device "' + label + '"?\n\nIts traffic-log history is wiped. If it reconnects it lands as Blocked.')) return;
             try {
-                if (!policyID) {
-                    await api.delete('/api/devices/' + encodeURIComponent(mac) + '/policy');
-                    notify('Reverted ' + (d.alias || mac) + ' to Default', 'success');
-                } else {
-                    await api.put('/api/devices/' + encodeURIComponent(mac) + '/policy',
-                                  { policy_id: Number(policyID) });
-                    const p = this.policies.find(x => x.id == policyID);
-                    notify((d.alias || mac) + ' → ' + (p ? p.name : policyID), 'success');
-                }
+                await api.delete('/api/devices/' + encodeURIComponent(d.mac_address));
+                notify('Device forgotten', 'success');
                 this.load();
             } catch(e) {}
         },
-        async toggleBlock(d) {
-            d.is_blocked = !d.is_blocked;
-            try {
-                await api.put('/api/devices/' + encodeURIComponent(d.mac_address), {
-                    alias: d.alias,
-                    is_blocked: d.is_blocked
-                });
-                notify(d.is_blocked ? 'Device blocked' : 'Device unblocked', 'success');
-            } catch(e) {
-                d.is_blocked = !d.is_blocked;
-            }
-        },
+
         editDevice(d) {
-            this.editForm = { mac: d.mac_address, alias: d.alias, is_blocked: d.is_blocked };
-            document.getElementById('edit-dialog').showModal();
+            this.editForm = {
+                mac: d.mac_address,
+                alias: d.alias || '',
+                ignore_traffic_log: !!d.ignore_traffic_log,
+            };
+            this.editing = true;
         },
-        closeEdit() {
-            document.getElementById('edit-dialog').close();
-        },
+        closeEdit() { this.editing = false; },
         async saveDevice() {
-            await api.put('/api/devices/' + encodeURIComponent(this.editForm.mac), {
-                alias: this.editForm.alias,
-                is_blocked: this.editForm.is_blocked
-            });
-            notify('Device updated', 'success');
-            this.closeEdit();
-            this.load();
-        }
+            try {
+                await api.put('/api/devices/' + encodeURIComponent(this.editForm.mac), {
+                    alias: this.editForm.alias,
+                    ignore_traffic_log: this.editForm.ignore_traffic_log,
+                });
+                notify('Device updated', 'success');
+                this.closeEdit();
+                this.load();
+            } catch(e) {}
+        },
     };
 }
 </script>

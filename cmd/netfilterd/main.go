@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"time"
 
 	"github.com/iulianfsdro/rpi-network-filter/internal/config"
 	"github.com/iulianfsdro/rpi-network-filter/internal/database"
@@ -74,16 +73,43 @@ func main() {
 		os.Exit(0)
 	}
 
+	// Drop the legacy DNS-hijack override if a prior version left one —
+	// connman must resolve to its real public IP for the transparent
+	// DNAT spoof (firewall prerouting) to work.
+	if err := svc.Spoof.EnsureNoDnsmasqHijack(); err != nil {
+		log.Printf("[WARN] Failed to clear legacy spoof dnsmasq override: %v", err)
+	}
+
+	// Auto-heal the default-deny posture on legacy installs whose
+	// /etc/dnsmasq.conf still carries global `server=<upstream>` lines
+	// (those make `address=/#/` a no-op) or whose /etc/resolv.conf still
+	// routes the Pi's own queries through the local dnsmasq.
+	if err := svc.DNS.EnsureDefaultDenyConfig(); err != nil {
+		log.Printf("[WARN] Failed to heal default-deny DNS config: %v", err)
+	}
+
 	// Apply all rules on startup
 	svc.ApplyAll()
 
 	// Start background services
 	go svc.Network.StartScanner()
+	go func() {
+		if err := svc.Spoof.ListenAndServe(); err != nil {
+			log.Printf("[SPOOF] listener exited: %v", err)
+		}
+	}()
+	go func() {
+		if err := svc.Spoof.ListenAndServeTLS(); err != nil {
+			log.Printf("[SPOOF] TLS listener exited: %v", err)
+		}
+	}()
+	// Transparent SNI proxy — the sole :443 gate for filtered devices.
+	go func() {
+		if err := svc.SNIProxy.ListenAndServe(); err != nil {
+			log.Printf("[SNI] proxy exited: %v", err)
+		}
+	}()
 	svc.TrafficLog.StartTailing()
-	// Periodic re-resolve of allow-list domains so the per-policy nft sets
-	// stay populated even when clients cache DNS answers past the dnsmasq
-	// TTL. 6 hours is aggressive enough to matter, rare enough to be cheap.
-	svc.Policy.StartRefreshLoop(6 * time.Hour)
 
 	router := handlers.NewRouterWithFS(db, svc, cfg, web.Content)
 
