@@ -42,9 +42,14 @@ import (
 	"path/filepath"
 	"time"
 
+	gobleble "github.com/go-ble/ble"
+	"crypto/ecdh"
+
 	"github.com/teslamotors/vehicle-command/pkg/connector/ble"
 	"github.com/teslamotors/vehicle-command/pkg/protocol"
+	keysproto "github.com/teslamotors/vehicle-command/pkg/protocol/protobuf/keys"
 	universal "github.com/teslamotors/vehicle-command/pkg/protocol/protobuf/universalmessage"
+	"github.com/teslamotors/vehicle-command/pkg/protocol/protobuf/vcsec"
 	"github.com/teslamotors/vehicle-command/pkg/vehicle"
 )
 
@@ -60,8 +65,27 @@ func main() {
 		keyPath   = flag.String("key", defaultKeyPath, "Path to NIST-P256 SEC1 PEM private key")
 		doPair    = flag.Bool("pair", false, "First-run mode: generate key + print fingerprint, then exit so you can enrol via the Tesla mobile app")
 		probeWake = flag.Bool("wake", true, "Wake the infotainment computer before querying charge/climate state (false = body-controller-state only)")
+		scanAll   = flag.Bool("scan-all", false, "Diagnostic: open BLE scan via go-ble for 15s, log every advertisement (LocalName + Addr + RSSI). Use when ScanVehicleBeacon times out — this proves whether go-ble sees ANY advertisements at all on this Pi.")
+		addKey    = flag.Bool("add-key-request", false, "Send add-key-request to the car: triggers the centre-console NFC-card prompt. Use this after you've stopped hostapd (Pi's WiFi AP) so BLE isn't starved by the shared radio. After the prompt → NFC tap → touchscreen confirm, run without this flag to verify pairing.")
 	)
 	flag.Parse()
+	if *scanAll {
+		log.Println("initialising BLE adapter (hci0) for open scan…")
+		if err := ble.InitAdapterWithID("hci0"); err != nil {
+			log.Fatalf("BLE adapter init: %v", err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		count := 0
+		log.Println("scanning for 15s — every advertisement is logged:")
+		err := gobleble.Scan(ctx, true, func(a gobleble.Advertisement) {
+			count++
+			fmt.Printf("  rssi=%4ddBm  addr=%s  name=%q  conn=%v\n",
+				a.RSSI(), a.Addr(), a.LocalName(), a.Connectable())
+		}, nil)
+		log.Printf("scan ended (err=%v); %d advertisements seen", err, count)
+		return
+	}
 	if *vin == "" {
 		log.Fatal("--vin required (full 17-char VIN; printed on the door jamb sticker or in the mobile app)")
 	}
@@ -128,6 +152,26 @@ func main() {
 	t2 := time.Now()
 	if err := car.Connect(sessCtx); err != nil {
 		log.Fatalf("car.Connect: %v", err)
+	}
+
+	// add-key-request runs BEFORE any signed session attempt — by
+	// design, the car has no idea who we are yet. Sending it routes
+	// through the open BLE channel; the car's centre console will
+	// prompt the operator to tap their NFC key card.
+	if *addKey {
+		pubKey, err := ecdh.P256().NewPublicKey(privKey.PublicBytes())
+		if err != nil {
+			log.Fatalf("public key parse: %v", err)
+		}
+		log.Println("sending add-key-request (role=DRIVER, form=CLOUD_KEY)…")
+		reqCtx, reqCancel := context.WithTimeout(context.Background(), commandTimeout)
+		defer reqCancel()
+		if err := car.SendAddKeyRequestWithRole(reqCtx, pubKey, keysproto.Role_ROLE_DRIVER, vcsec.KeyFormFactor_KEY_FORM_FACTOR_CLOUD_KEY); err != nil {
+			log.Fatalf("SendAddKeyRequestWithRole: %v", err)
+		}
+		log.Println("REQUEST SENT — look at the centre console screen, tap your NFC key card on the reader, then confirm on the touchscreen.")
+		log.Println("After the tap, re-run without -add-key-request to verify the pairing took.")
+		return
 	}
 	// Session for the VCSEC domain (cheap state — locks, closures, sleep).
 	if err := car.StartSession(sessCtx, []universal.Domain{universal.Domain_DOMAIN_VEHICLE_SECURITY}); err != nil {

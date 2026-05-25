@@ -85,10 +85,24 @@ const (
 	teslaPollInterval = 30 * time.Second
 )
 
-// adapterInitOnce gates ble.InitAdapterWithID — calling it twice on the
-// same process panics inside go-ble.
-var adapterInitOnce sync.Once
-var adapterInitErr error
+// adapterInitMu + adapterInitOK gate ble.InitAdapterWithID. Two
+// constraints to honour:
+//
+//   1. go-ble panics if InitAdapterWithID is called twice in the same
+//      process when the prior call succeeded — so we must remember
+//      success and skip the second call.
+//   2. The first call CAN fail transiently (rfkill not yet unblocked,
+//      bluetoothd not yet running, race during early boot). A sync.Once
+//      would freeze that failure for the process lifetime, breaking
+//      every later scan even after the environment recovers. We retry
+//      on failure instead.
+//
+// Net: take the mutex, init only if we haven't already succeeded,
+// surface the latest error if any.
+var (
+	adapterInitMu sync.Mutex
+	adapterInitOK bool
+)
 
 // VehicleSnapshot is the consolidated state /garage reads. Every field
 // is paired with an "as of" timestamp so the UI can render staleness
@@ -759,13 +773,21 @@ func (s *TeslaService) withSession(parent context.Context, vin string, domains [
 	return fn(car)
 }
 
-// initAdapter is the one-shot ble.InitAdapterWithID call. Returns the
-// first error forever — the SDK panics on double init.
+// initAdapter brings the BLE adapter online for go-ble. Idempotent on
+// success (won't re-call and trip go-ble's double-init panic) and
+// retriable on failure (caller can recover after the operator unblocks
+// rfkill or starts bluetoothd).
 func initAdapter(name string) error {
-	adapterInitOnce.Do(func() {
-		adapterInitErr = ble.InitAdapterWithID(name)
-	})
-	return adapterInitErr
+	adapterInitMu.Lock()
+	defer adapterInitMu.Unlock()
+	if adapterInitOK {
+		return nil
+	}
+	if err := ble.InitAdapterWithID(name); err != nil {
+		return err
+	}
+	adapterInitOK = true
+	return nil
 }
 
 // runVCSECCommand is the standard command wrapper: VCSEC session,
