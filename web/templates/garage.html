@@ -64,7 +64,14 @@
                         </div>
                     </li>
                     <li>
-                        <strong>Tap your NFC key card on the centre console.</strong>
+                        <strong>Tap your NFC key card on the wireless charging pad.</strong>
+                        <div class="callout" style="margin-top:8px;">
+                            On the Model Y (and Model 3 with the 2023+ refresh), the NFC key reader
+                            is <strong>integrated into the Qi wireless charging pad</strong> between the front
+                            seats — not a separate physical spot. Lay the card flat on the pad. It's the same
+                            spot you'd tap to authorise a phone-key handoff for valet. If nothing happens, slide
+                            the card around until the screen confirms.
+                        </div>
                         Then confirm on the touchscreen. The Pi is polling — you'll see the page switch to
                         the dashboard within a few seconds of the tap.
                     </li>
@@ -502,5 +509,14 @@ function garageApp() {
 .badge.muted { background: rgba(129, 129, 129, 0.15); color: var(--muted); }
 .form-error { color: var(--danger); margin-top: 8px; font-size: 13px; }
 .empty { padding: 24px; text-align: center; color: var(--muted); }
+.callout {
+    padding: 12px 14px;
+    border-radius: 8px;
+    background: rgba(240, 160, 32, 0.07);
+    border-left: 3px solid var(--warn);
+    color: var(--fg-dim);
+    font-size: 13px;
+    line-height: 1.55;
+}
 </style>
 {{end}}
