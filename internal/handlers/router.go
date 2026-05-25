@@ -45,6 +45,7 @@ func NewRouterWithFS(db *sql.DB, svc *services.Services, cfg config.Config, webF
 	settingsH := NewSettingsHandler(db, svc, renderer)
 	sysH := NewSystemHandler(svc)
 	teslaH := NewTeslaHandler(svc, renderer)
+	remoteH := NewRemoteHandler(svc, renderer)
 
 	// Static assets
 	r.Handle("/static/*", http.StripPrefix("/static/", http.FileServer(http.FS(staticFS))))
@@ -77,6 +78,7 @@ func NewRouterWithFS(db *sql.DB, svc *services.Services, cfg config.Config, webF
 		r.Get("/bandwidth", bwH.Page)
 		r.Get("/settings", settingsH.Page)
 		r.Get("/garage", teslaH.Page)
+		r.Get("/remote-access", remoteH.Page)
 	})
 
 	// API routes
@@ -153,6 +155,13 @@ func NewRouterWithFS(db *sql.DB, svc *services.Services, cfg config.Config, webF
 				r.Get("/state", teslaH.State)
 				r.Get("/log", teslaH.CommandLog)
 				r.Post("/commands/{name}", teslaH.Command)
+			})
+
+			r.Route("/remote", func(r chi.Router) {
+				r.Get("/status", remoteH.Status)
+				r.Post("/install", remoteH.Install)
+				r.Post("/up", remoteH.Up)
+				r.Post("/logout", remoteH.Logout)
 			})
 		})
 	})
