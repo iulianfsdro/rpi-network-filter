@@ -110,21 +110,6 @@ fi
 # UI's /remote-access page. The daemon comes up "logged out"; that's
 # fine.
 
-# --- Passwordless sudo for pi -------------------------------------------------
-#
-# Two reasons:
-#   1. The Makefile's `make install` and the in-app upgrade flows
-#      shell out via SSH and need sudo to land the binary. Without
-#      NOPASSWD they fail with the unhelpful
-#      "sudo: a terminal is required to read the password" error.
-#   2. We've hit visudo typos before (e.g. "pi_user" vs "pi" silently
-#      not matching). Writing a dedicated drop-in keeps the main
-#      sudoers untouched.
-info "Setting up passwordless sudo for 'pi'..."
-echo 'pi ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/010-pi-nopasswd
-chmod 440 /etc/sudoers.d/010-pi-nopasswd
-visudo -c >/dev/null  # syntax-check; aborts setup if broken
-
 # --- Stop/unmask services before reconfiguring -------------------------------
 
 info "Preparing services..."
