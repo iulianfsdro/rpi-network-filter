@@ -28,7 +28,10 @@ type Config struct {
 
 func Defaults() Config {
 	return Config{
-		ListenAddr:     "192.168.4.1:80",
+		// Bind on all interfaces by default so Tailscale (tailscale0) can
+		// reach the UI without the operator having to remember to
+		// rewrite the address. Per-interface ACL lives in the firewall.
+		ListenAddr:     ":80",
 		UseTLS:         false,
 		TLSCert:        "/etc/netfilterd/server.crt",
 		TLSKey:         "/etc/netfilterd/server.key",

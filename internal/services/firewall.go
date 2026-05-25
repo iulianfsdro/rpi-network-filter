@@ -208,6 +208,15 @@ func (s *FirewallService) generateConfig(rules []models.FirewallRule, snap devic
 
 	// Input chain — traffic terminating on the Pi: DNS, DHCP, SSH, the
 	// connman spoof (:80/:443), the admin UI (:8443), and the SNI proxy.
+	//
+	// LAN-only ports (53/67/80/443/SNI-proxy) stay bound to wlan0 — the
+	// captive-check spoof and SNI redirect only make sense for the
+	// car's own traffic, and we don't want a tailnet peer wandering into
+	// them. The admin UI (:8443) and SSH (:22), in contrast, are also
+	// allowed from tailscale0 so remote-access via Tailscale actually
+	// reaches the daemon. nftables happily loads a rule referencing an
+	// interface name that doesn't exist yet — if tailscaled isn't running,
+	// the rule simply never matches.
 	b.WriteString("    chain input {\n")
 	b.WriteString("        type filter hook input priority filter; policy drop;\n")
 	b.WriteString("        ct state established,related accept\n")
@@ -219,6 +228,9 @@ func (s *FirewallService) generateConfig(rules []models.FirewallRule, snap devic
 	fmt.Fprintf(&b, "        iifname \"%s\" tcp dport 443 accept\n", s.cfg.LANInterface)
 	fmt.Fprintf(&b, "        iifname \"%s\" tcp dport 8443 accept\n", s.cfg.LANInterface)
 	fmt.Fprintf(&b, "        iifname \"%s\" tcp dport %d accept\n", s.cfg.LANInterface, s.cfg.SNIProxyPort)
+	// Tailscale: admin UI + SSH only.
+	b.WriteString("        iifname \"tailscale0\" tcp dport 22 accept\n")
+	b.WriteString("        iifname \"tailscale0\" tcp dport 8443 accept\n")
 	b.WriteString("    }\n\n")
 
 	// Forward chain. A filtered device's :80/:443 was already intercepted
