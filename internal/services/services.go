@@ -21,6 +21,7 @@ type Services struct {
 	Filter     *FilterService
 	Spoof      *SpoofService
 	SNIProxy   *SNIProxyService
+	Tesla      *TeslaService
 }
 
 func New(db *sql.DB, exec *executor.Executor, cfg config.Config) *Services {
@@ -41,6 +42,7 @@ func New(db *sql.DB, exec *executor.Executor, cfg config.Config) *Services {
 		Filter:     filter,
 		Spoof:      NewSpoofService(cfg, exec),
 		SNIProxy:   NewSNIProxyService(cfg, db, trafficLog),
+		Tesla:      NewTeslaService(db, audit),
 	}
 }
 

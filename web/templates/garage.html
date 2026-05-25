@@ -1,0 +1,439 @@
+{{define "title"}}Garage{{end}}
+
+{{define "content"}}
+<div x-data="garageApp()" x-init="init()">
+    <div class="page-head">
+        <div>
+            <div class="page-head-eyebrow">
+                <strong>BLE link</strong>
+                <span x-show="paired" style="color:var(--ok);">· paired</span>
+                <span x-show="!paired" style="color:var(--muted);">· not paired</span>
+            </div>
+            <h1 class="page-head-title">Garage</h1>
+            <p class="page-head-sub">
+                Direct BLE control of the Tesla — locks, climate, charge, closures — bypassing
+                Tesla's servers entirely. The Pi pairs once via the Tesla mobile app;
+                from then on every command is signed and goes over Bluetooth from the glovebox.
+            </p>
+        </div>
+        <div class="page-head-right">
+            <button class="btn" @click="refresh('full')" :disabled="busy">
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M14 8a6 6 0 1 0-2 4.5"/><path d="M14 3v4h-4"/></svg>
+                <span x-text="busy ? 'Working…' : 'Refresh'"></span>
+            </button>
+        </div>
+    </div>
+
+    <!-- ── Pairing card (shown until paired) ─────────────────────── -->
+    <template x-if="!paired">
+        <div class="card">
+            <div class="card-head">
+                <div>
+                    <div class="card-head-title">Pair this Pi with your Tesla</div>
+                    <div class="card-head-sub">One-time setup · ~90 seconds</div>
+                </div>
+            </div>
+            <div class="card-body">
+                <ol class="ol-steps">
+                    <li>
+                        <strong>Enter your VIN.</strong>
+                        17 characters, printed on the door-jamb sticker or under the mobile app's <em>Vehicle Details</em>.
+                        <div class="form-row" style="margin-top:8px;">
+                            <input type="text" class="input mono" maxlength="17"
+                                   x-model="vinInput" placeholder="5YJ3..." style="width:280px;">
+                            <button class="btn" @click="saveVIN()" :disabled="vinInput.length !== 17">Save VIN</button>
+                        </div>
+                    </li>
+                    <li>
+                        <strong>Enrol the public key in your Tesla app.</strong>
+                        Open the mobile app → <em>Security &amp; Drivers</em> → <em>Locks</em> → <em>Add Key</em>,
+                        and paste the PEM below.
+                        <pre class="pem-block" x-text="publicKeyPEM || '(load failed — refresh the page)'"></pre>
+                        <button class="btn ghost" @click="copyPEM()">Copy</button>
+                    </li>
+                    <li>
+                        <strong>Approve the new key in the car.</strong>
+                        The car will prompt you to tap your physical NFC key card on the centre console.
+                    </li>
+                    <li>
+                        <strong>Confirm the handshake.</strong>
+                        <button class="btn" @click="confirmPair()" :disabled="busy || !vin">
+                            <span x-text="busy ? 'Pinging the car…' : 'I\'ve enrolled the key'"></span>
+                        </button>
+                        <div x-show="pairError" class="form-error" x-text="pairError"></div>
+                    </li>
+                </ol>
+            </div>
+        </div>
+    </template>
+
+    <!-- ── Battery + lock summary ───────────────────────────────── -->
+    <template x-if="paired">
+        <div>
+            <div class="grid-2">
+                <div class="card">
+                    <div class="card-head">
+                        <div>
+                            <div class="card-head-title">Battery</div>
+                            <div class="card-head-sub" x-text="chargeFreshnessLabel"></div>
+                        </div>
+                        <span class="card-head-spacer"></span>
+                        <span class="badge" :class="chargeBadgeClass" x-text="charging.state"></span>
+                    </div>
+                    <div class="card-body" style="display:flex; align-items:center; gap:24px;">
+                        <!-- Battery ring -->
+                        <svg viewBox="0 0 120 120" width="120" height="120" class="battery-ring">
+                            <circle cx="60" cy="60" r="52" fill="none" stroke="#212121" stroke-width="8"/>
+                            <circle cx="60" cy="60" r="52" fill="none"
+                                    :stroke="batteryRingColor"
+                                    stroke-width="8"
+                                    stroke-linecap="round"
+                                    stroke-dasharray="326.7"
+                                    :stroke-dashoffset="326.7 - (326.7 * (charge.battery_pct || 0) / 100)"
+                                    transform="rotate(-90 60 60)"
+                                    style="transition: stroke-dashoffset .5s ease;"/>
+                            <text x="60" y="62" text-anchor="middle" dy=".35em" class="battery-ring-num"
+                                  x-text="(charge.battery_pct || 0) + '%'"></text>
+                        </svg>
+                        <div class="stat-block">
+                            <div class="stat-row">
+                                <span>Range</span>
+                                <strong><span x-text="Math.round(charge.battery_range_km || 0)"></span> km</strong>
+                            </div>
+                            <div class="stat-row">
+                                <span>Charge limit</span>
+                                <strong x-text="(charge.charge_limit_soc || 0) + '%'"></strong>
+                            </div>
+                            <div class="stat-row" x-show="(charge.charger_power_kw || 0) > 0">
+                                <span>Charging at</span>
+                                <strong><span x-text="charge.charger_power_kw"></span> kW</strong>
+                            </div>
+                            <div class="stat-row" x-show="(charge.minutes_to_full || 0) > 0">
+                                <span>Time to full</span>
+                                <strong x-text="formatMinutes(charge.minutes_to_full)"></strong>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-head">
+                        <div>
+                            <div class="card-head-title">Locks &amp; presence</div>
+                            <div class="card-head-sub" x-text="vcsecFreshnessLabel"></div>
+                        </div>
+                        <span class="card-head-spacer"></span>
+                        <span class="badge" :class="lockBadgeClass" x-text="vcsec.lock_state || 'unknown'"></span>
+                        <span class="badge" :class="vcsec.sleep_status === 'asleep' ? 'info' : 'success'"
+                              x-text="vcsec.sleep_status || 'unknown'"></span>
+                    </div>
+                    <div class="card-body">
+                        <div class="closure-grid">
+                            <template x-for="c in closureCards" :key="c.key">
+                                <div class="closure-card" :class="c.open ? 'open' : 'closed'">
+                                    <div class="closure-label" x-text="c.label"></div>
+                                    <div class="closure-state" x-text="c.state"></div>
+                                </div>
+                            </template>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ── Climate + commands ────────────────────────────── -->
+            <div class="grid-2">
+                <div class="card">
+                    <div class="card-head">
+                        <div>
+                            <div class="card-head-title">Climate</div>
+                            <div class="card-head-sub" x-text="climateFreshnessLabel"></div>
+                        </div>
+                        <span class="card-head-spacer"></span>
+                        <span class="badge" :class="climate.is_climate_on ? 'success' : 'muted'"
+                              x-text="climate.is_climate_on ? 'on' : 'off'"></span>
+                    </div>
+                    <div class="card-body">
+                        <div class="stat-row">
+                            <span>Inside</span>
+                            <strong><span x-text="formatTemp(climate.inside_temp_c)"></span> °C</strong>
+                        </div>
+                        <div class="stat-row">
+                            <span>Outside</span>
+                            <strong><span x-text="formatTemp(climate.outside_temp_c)"></span> °C</strong>
+                        </div>
+                        <div class="stat-row">
+                            <span>Setpoint</span>
+                            <strong><span x-text="formatTemp(climate.driver_temp_set_c)"></span> °C</strong>
+                        </div>
+                        <div class="form-row" style="margin-top:12px; gap:8px;">
+                            <button class="btn" @click="cmd('climate-on')" :disabled="busy">Turn on</button>
+                            <button class="btn ghost" @click="cmd('climate-off')" :disabled="busy">Turn off</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-head">
+                        <div>
+                            <div class="card-head-title">Quick actions</div>
+                            <div class="card-head-sub">BLE round-trip · ~500ms-2s</div>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <div class="cmd-grid">
+                            <button class="btn" @click="cmd('lock')" :disabled="busy">Lock</button>
+                            <button class="btn" @click="cmd('unlock')" :disabled="busy">Unlock</button>
+                            <button class="btn" @click="cmd('flash-lights')" :disabled="busy">Flash lights</button>
+                            <button class="btn" @click="cmd('honk')" :disabled="busy">Honk</button>
+                            <button class="btn" @click="cmd('open-frunk')" :disabled="busy">Frunk</button>
+                            <button class="btn" @click="cmd('open-trunk')" :disabled="busy">Trunk</button>
+                            <button class="btn" @click="cmd('open-charge-port')" :disabled="busy">Charge port</button>
+                            <button class="btn ghost" @click="cmd('wake')" :disabled="busy">Wake</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ── Recent activity ───────────────────────────────── -->
+            <div class="card">
+                <div class="card-head">
+                    <div>
+                        <div class="card-head-title">Recent activity</div>
+                        <div class="card-head-sub">Local audit log · last 20</div>
+                    </div>
+                </div>
+                <div class="card-body tight">
+                    <template x-if="log.length === 0">
+                        <div class="empty">No commands yet.</div>
+                    </template>
+                    <table class="tbl" x-show="log.length > 0">
+                        <thead>
+                            <tr>
+                                <th style="width:170px;">When</th>
+                                <th>Command</th>
+                                <th style="width:80px;">Result</th>
+                                <th style="width:80px;">Latency</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <template x-for="r in log" :key="r.at + r.command">
+                                <tr>
+                                    <td class="mono" x-text="r.at"></td>
+                                    <td class="mono" x-text="r.command"></td>
+                                    <td>
+                                        <span class="badge" :class="r.succeeded ? 'success' : 'danger'"
+                                              x-text="r.succeeded ? 'ok' : 'failed'"></span>
+                                    </td>
+                                    <td class="mono" x-text="r.latency_ms + ' ms'"></td>
+                                </tr>
+                            </template>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </template>
+</div>
+
+<script>
+function garageApp() {
+    return {
+        // pairing state
+        paired: false,
+        vin: '',
+        vinInput: '',
+        publicKeyPEM: '',
+        pairError: '',
+
+        // live snapshot
+        vcsec: {},
+        charge: {},
+        climate: {},
+        bcsFreshnessMs: null,
+        chargeFreshnessMs: null,
+        climateFreshnessMs: null,
+
+        // recent activity
+        log: [],
+
+        // command-busy flag — disables every action button during a BLE round-trip
+        busy: false,
+
+        // ── lifecycle ──────────────────────────────────────────
+        async init() {
+            await this.loadPairing();
+            if (this.paired) {
+                await this.refresh('bcs');
+                await this.loadLog();
+                // background polling — every 15s for cached state, every 60s for log
+                this._statePoll = setInterval(() => this.refresh(''), 15000);
+                this._logPoll = setInterval(() => this.loadLog(), 60000);
+            }
+        },
+
+        // ── pairing flow ───────────────────────────────────────
+        async loadPairing() {
+            try {
+                const info = await api.get('/api/tesla/pair');
+                this.paired = info.paired;
+                this.vin = info.vin || '';
+                this.vinInput = this.vin;
+                this.publicKeyPEM = info.public_key_pem || '';
+            } catch (e) { /* swallow — render loading state */ }
+        },
+        async saveVIN() {
+            this.pairError = '';
+            try {
+                await api.put('/api/tesla/vin', { vin: this.vinInput });
+                this.vin = this.vinInput;
+                notify('VIN saved', 'success');
+            } catch (e) { this.pairError = e.message || 'failed to save VIN'; }
+        },
+        async copyPEM() {
+            try { await navigator.clipboard.writeText(this.publicKeyPEM); notify('PEM copied', 'success'); }
+            catch (e) { notify('clipboard blocked — select manually', 'warn'); }
+        },
+        async confirmPair() {
+            this.pairError = '';
+            this.busy = true;
+            try {
+                await api.post('/api/tesla/pair', {});
+                this.paired = true;
+                notify('Paired ✓', 'success');
+                await this.refresh('bcs');
+                await this.loadLog();
+            } catch (e) {
+                this.pairError = e.message || 'pairing handshake failed — is the key enrolled?';
+            } finally {
+                this.busy = false;
+            }
+        },
+
+        // ── state refresh ──────────────────────────────────────
+        async refresh(mode) {
+            this.busy = mode !== '';
+            try {
+                const q = mode ? '?refresh=' + mode : '';
+                const r = await api.get('/api/tesla/state' + q);
+                if (r && r.snapshot) {
+                    this.vcsec   = r.snapshot.vcsec || {};
+                    this.charge  = r.snapshot.charge || {};
+                    this.climate = r.snapshot.climate || {};
+                    this.bcsFreshnessMs     = (r.snapshot.vcsec   || {}).freshness_ms;
+                    this.chargeFreshnessMs  = (r.snapshot.charge  || {}).freshness_ms;
+                    this.climateFreshnessMs = (r.snapshot.climate || {}).freshness_ms;
+                }
+                if (r && r.error) notify(r.error, 'warn');
+            } catch (e) { /* keep last good snapshot */ }
+            this.busy = false;
+        },
+
+        // ── commands ───────────────────────────────────────────
+        async cmd(name) {
+            this.busy = true;
+            try {
+                await api.post('/api/tesla/commands/' + name, {});
+                notify(name.replace(/-/g, ' ') + ' ✓', 'success');
+                // re-poll cheap state after a command so the UI catches up
+                setTimeout(() => this.refresh('bcs'), 1500);
+                this.loadLog();
+            } catch (e) {
+                notify(e.message || (name + ' failed'), 'danger');
+            } finally {
+                this.busy = false;
+            }
+        },
+
+        async loadLog() {
+            try { this.log = (await api.get('/api/tesla/log?limit=20')) || []; }
+            catch (e) {}
+        },
+
+        // ── derived UI helpers ─────────────────────────────────
+        get vcsecFreshnessLabel() { return this._fresh(this.bcsFreshnessMs); },
+        get chargeFreshnessLabel() { return this._fresh(this.chargeFreshnessMs); },
+        get climateFreshnessLabel() { return this._fresh(this.climateFreshnessMs); },
+        _fresh(ms) {
+            if (ms == null) return 'never polled';
+            if (ms < 5000)   return 'fresh';
+            if (ms < 60000)  return Math.floor(ms/1000) + 's ago';
+            if (ms < 3600000) return Math.floor(ms/60000) + 'm ago';
+            return Math.floor(ms/3600000) + 'h ago';
+        },
+        get batteryRingColor() {
+            const p = this.charge.battery_pct || 0;
+            if (p < 15) return 'var(--danger)';
+            if (p < 30) return '#ffaa33';
+            return 'var(--ok)';
+        },
+        get chargeBadgeClass() {
+            const s = (this.charge.charging_state || '').toLowerCase();
+            if (s === 'charging' || s === 'starting') return 'success';
+            if (s === 'no_power' || s === 'stopped')  return 'danger';
+            return 'muted';
+        },
+        get lockBadgeClass() {
+            const s = (this.vcsec.lock_state || '').toLowerCase();
+            if (s === 'locked' || s === 'internal_locked') return 'success';
+            if (s === 'unlocked' || s === 'selective_unlocked') return 'danger';
+            return 'muted';
+        },
+        get closureCards() {
+            const c = (this.vcsec || {}).closures || {};
+            const items = [
+                ['front_driver_door',    'Driver door'],
+                ['front_passenger_door', 'Passenger door'],
+                ['rear_driver_door',     'Driver rear'],
+                ['rear_passenger_door',  'Passenger rear'],
+                ['front_trunk',          'Frunk'],
+                ['rear_trunk',           'Trunk'],
+                ['charge_port',          'Charge port'],
+            ];
+            return items.map(([key, label]) => {
+                const state = c[key] || 'unknown';
+                return { key, label, state, open: state !== 'closed' && state !== 'unknown' };
+            });
+        },
+        formatTemp(c) { return (c == null || isNaN(c)) ? '—' : c.toFixed(1); },
+        formatMinutes(m) {
+            if (!m) return '0m';
+            if (m < 60) return m + 'm';
+            return Math.floor(m/60) + 'h ' + (m % 60) + 'm';
+        },
+    };
+}
+</script>
+
+<style>
+/* Garage-specific styling lives inline because /garage is the only page
+   that needs the battery ring + closure grid + PEM block. If these
+   become reused we'll lift them into app.css. */
+.battery-ring { flex-shrink: 0; }
+.battery-ring-num { font-family: 'Inter', sans-serif; font-weight: 600; font-size: 22px; fill: var(--text); }
+.stat-block { flex: 1; display: flex; flex-direction: column; gap: 12px; }
+.stat-row { display: flex; justify-content: space-between; align-items: baseline; padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,0.04); }
+.stat-row:last-child { border-bottom: none; }
+.stat-row strong { font-feature-settings: 'tnum'; }
+.closure-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; }
+.closure-card { padding: 12px; border-radius: 10px; background: #161616; border: 1px solid #212121; }
+.closure-card.open { border-color: var(--danger); }
+.closure-card.closed { border-color: rgba(0, 208, 132, 0.3); }
+.closure-label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px; }
+.closure-state { font-size: 14px; font-weight: 500; }
+.closure-card.open .closure-state { color: var(--danger); }
+.closure-card.closed .closure-state { color: var(--ok); }
+.cmd-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; }
+.ol-steps { padding-left: 20px; line-height: 1.7; }
+.ol-steps > li { padding: 8px 0; }
+.pem-block {
+    background: #0a0a0a; border: 1px solid #212121; border-radius: 8px;
+    padding: 12px; margin: 10px 0; font-family: 'JetBrains Mono', monospace;
+    font-size: 11px; white-space: pre-wrap; word-break: break-all; color: var(--muted);
+}
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
+@media (max-width: 900px) { .grid-2 { grid-template-columns: 1fr; } }
+.badge.muted { background: rgba(129, 129, 129, 0.15); color: var(--muted); }
+.form-error { color: var(--danger); margin-top: 8px; font-size: 13px; }
+.empty { padding: 24px; text-align: center; color: var(--muted); }
+</style>
+{{end}}

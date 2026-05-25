@@ -718,6 +718,48 @@ var migrations = []string{
 	-- Drop Disney+. filter_domains first (FK), then the filter row itself.
 	DELETE FROM filter_domains WHERE preset_id IN (SELECT id FROM filters WHERE name='Disney+');
 	DELETE FROM filters WHERE name='Disney+';`,
+
+	// v20: V4 Tesla BLE tables. Two of them, both purely append-only to
+	// V3's schema — no existing row is touched. /garage reads them once
+	// per page load; commands write one row each.
+	//
+	//   tesla_pairing: rows are keyed by VIN. paired_at is the
+	//     wall-clock timestamp of the last successful VCSEC session
+	//     handshake (i.e. the operator confirmed the public key landed
+	//     in the Tesla mobile app). The same row is upserted on every
+	//     re-pair; we keep at most one row per VIN.
+	//
+	//   tesla_command_log: append-only audit trail of every BLE command
+	//     issued by the daemon, with the user who triggered it (FK to
+	//     users), command name (lock, unlock, climate_on, …), success
+	//     flag, round-trip latency, and error string if any. The
+	//     /garage activity strip surfaces the most recent N entries;
+	//     security-conscious operators can also tail this to confirm
+	//     nothing has issued commands they didn't.
+	//
+	// The audit row complements — does NOT replace — Tesla's own
+	// "Key Activity" log inside the mobile app. The Tesla-side log is
+	// the tamper-resistant source of truth (it's signed by the same
+	// key); ours is the local "why did the daemon do that" trail.
+	`CREATE TABLE IF NOT EXISTS tesla_pairing (
+		vin             TEXT PRIMARY KEY,
+		paired_at       TIMESTAMP,
+		public_key_fp   TEXT,
+		created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+	);
+
+	CREATE TABLE IF NOT EXISTS tesla_command_log (
+		id          INTEGER PRIMARY KEY AUTOINCREMENT,
+		at          TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		user_id     INTEGER,
+		command     TEXT NOT NULL,
+		succeeded   INTEGER NOT NULL DEFAULT 0,
+		latency_ms  INTEGER NOT NULL DEFAULT 0,
+		error       TEXT NOT NULL DEFAULT ''
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_tesla_command_log_at ON tesla_command_log(at DESC);
+	CREATE INDEX IF NOT EXISTS idx_tesla_command_log_user ON tesla_command_log(user_id, at DESC);`,
 }
 
 func Migrate(db *sql.DB) error {

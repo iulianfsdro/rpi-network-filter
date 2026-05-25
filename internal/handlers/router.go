@@ -44,6 +44,7 @@ func NewRouterWithFS(db *sql.DB, svc *services.Services, cfg config.Config, webF
 	filtH := NewFiltersHandler(svc, renderer)
 	settingsH := NewSettingsHandler(db, svc, renderer)
 	sysH := NewSystemHandler(svc)
+	teslaH := NewTeslaHandler(svc, renderer)
 
 	// Static assets
 	r.Handle("/static/*", http.StripPrefix("/static/", http.FileServer(http.FS(staticFS))))
@@ -75,6 +76,7 @@ func NewRouterWithFS(db *sql.DB, svc *services.Services, cfg config.Config, webF
 		r.Get("/filters", filtH.Page)
 		r.Get("/bandwidth", bwH.Page)
 		r.Get("/settings", settingsH.Page)
+		r.Get("/garage", teslaH.Page)
 	})
 
 	// API routes
@@ -142,6 +144,15 @@ func NewRouterWithFS(db *sql.DB, svc *services.Services, cfg config.Config, webF
 				r.Get("/stats/top-clients", sysH.StatsTopClients)
 				r.Get("/stats/timeseries", sysH.StatsTimeSeries)
 				r.Post("/reboot", sysH.Reboot)
+			})
+
+			r.Route("/tesla", func(r chi.Router) {
+				r.Get("/pair", teslaH.PairingInfo)
+				r.Post("/pair", teslaH.ConfirmPairing)
+				r.Put("/vin", teslaH.SetVIN)
+				r.Get("/state", teslaH.State)
+				r.Get("/log", teslaH.CommandLog)
+				r.Post("/commands/{name}", teslaH.Command)
 			})
 		})
 	})
