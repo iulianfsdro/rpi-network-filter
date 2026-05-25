@@ -6,15 +6,34 @@ import (
 	"log"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 
 	"github.com/iulianfsdro/rpi-network-filter/internal/executor"
 )
 
-// ap_channel accepts 1..14 — validated once at package scope rather than
-// compiled on every Apply call.
+// apChannelRe accepts 1..165 — any digits up to 3 chars. The semantic
+// validation (which band is this channel in?) happens in bandFor().
 var apChannelRe = regexp.MustCompile(`^[0-9]{1,3}$`)
+
+// bandFor maps an AP channel number to hostapd's hw_mode value. The
+// split is purely a 2.4 vs 5 GHz question: channels 1-14 are 2.4 GHz,
+// 36+ are 5 GHz. There's a gap (15-35) that's not allocated to either
+// band — we reject it as invalid.
+//
+// Returning ("a", true) means 5 GHz. ("g", false) means 2.4 GHz.
+// (_, _, err) means the channel isn't in either band.
+func bandFor(channel int) (hwMode string, is5GHz bool, err error) {
+	switch {
+	case channel >= 1 && channel <= 14:
+		return "g", false, nil
+	case channel >= 36 && channel <= 165:
+		return "a", true, nil
+	default:
+		return "", false, fmt.Errorf("channel %d isn't in any allocated 2.4 GHz (1-14) or 5 GHz (36-165) band", channel)
+	}
+}
 
 type HotspotService struct {
 	db   *sql.DB
@@ -38,11 +57,26 @@ func (s *HotspotService) Apply() error {
 	ssid := SanitizeSingleLine(settings["ap_ssid"])
 	pass := SanitizeSingleLine(settings["ap_password"])
 	channel := SanitizeSingleLine(settings["ap_channel"])
+	country := SanitizeSingleLine(settings["ap_country"])
 	if len(pass) < 8 {
 		return fmt.Errorf("wpa_passphrase must be at least 8 chars after sanitisation")
 	}
 	if !apChannelRe.MatchString(channel) {
 		return fmt.Errorf("invalid ap_channel %q", channel)
+	}
+	channelInt, err := strconv.Atoi(channel)
+	if err != nil {
+		return fmt.Errorf("ap_channel %q is not numeric: %w", channel, err)
+	}
+	hwMode, is5GHz, err := bandFor(channelInt)
+	if err != nil {
+		return err
+	}
+	// country_code is mandatory for 5 GHz (regulatory). For 2.4 GHz
+	// it's optional but harmless. Default to "00" (worldwide, UNII-1
+	// 5 GHz channels 36-48 allowed) if the operator hasn't set one.
+	if country == "" {
+		country = "00"
 	}
 
 	var b strings.Builder
@@ -50,9 +84,22 @@ func (s *HotspotService) Apply() error {
 	b.WriteString("interface=wlan0\n")
 	b.WriteString("driver=nl80211\n")
 	fmt.Fprintf(&b, "ssid=%s\n", ssid)
-	b.WriteString("hw_mode=g\n")
+	fmt.Fprintf(&b, "hw_mode=%s\n", hwMode)
 	fmt.Fprintf(&b, "channel=%s\n", channel)
-	b.WriteString("wmm_enabled=0\n")
+	fmt.Fprintf(&b, "country_code=%s\n", country)
+	// ieee80211d advertises the country code in beacons (needed by
+	// regulatory-strict clients to learn allowed channels). ieee80211n
+	// enables HT/2.4-GHz wide channels. On 5 GHz we ALSO enable
+	// ieee80211ac (VHT) for modern speeds and ieee80211h (DFS + TPC,
+	// required if the operator later picks a DFS channel; harmless on
+	// non-DFS channels like 36).
+	b.WriteString("ieee80211d=1\n")
+	b.WriteString("ieee80211n=1\n")
+	if is5GHz {
+		b.WriteString("ieee80211ac=1\n")
+		b.WriteString("ieee80211h=1\n")
+	}
+	b.WriteString("wmm_enabled=1\n")
 	b.WriteString("macaddr_acl=0\n")
 	b.WriteString("auth_algs=1\n")
 	b.WriteString("ignore_broadcast_ssid=0\n")
@@ -78,13 +125,18 @@ func (s *HotspotService) Apply() error {
 }
 
 func (s *HotspotService) getSettings() map[string]string {
+	// Defaults bake V4's choice: 5 GHz channel 36 + worldwide regdomain.
+	// This frees the 2.4 GHz radio for BLE on the Pi 4 (where WiFi and
+	// BLE share one Broadcom chip and 2.4 GHz hostapd starves BLE scans).
+	// Existing installs upgrade via setting ap_channel=36 + ap_country.
 	defaults := map[string]string{
 		"ap_ssid":     "NetFilter",
 		"ap_password": "changeme123",
-		"ap_channel":  "6",
+		"ap_channel":  "36",
+		"ap_country":  "00",
 	}
 
-	rows, err := s.db.Query("SELECT key, value FROM settings WHERE key IN ('ap_ssid', 'ap_password', 'ap_channel')")
+	rows, err := s.db.Query("SELECT key, value FROM settings WHERE key IN ('ap_ssid', 'ap_password', 'ap_channel', 'ap_country')")
 	if err != nil {
 		// Don't silently write a default-passwd hostapd.conf — surface
 		// the DB failure so an operator notices instead of booting an

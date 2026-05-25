@@ -95,7 +95,7 @@
                             <div class="card-head-sub" x-text="chargeFreshnessLabel"></div>
                         </div>
                         <span class="card-head-spacer"></span>
-                        <span class="badge" :class="chargeBadgeClass" x-text="charging.state"></span>
+                        <span class="badge" :class="chargeBadgeClass" x-text="charge.charging_state || 'unknown'"></span>
                     </div>
                     <div class="card-body" style="display:flex; align-items:center; gap:24px;">
                         <!-- Battery ring -->
