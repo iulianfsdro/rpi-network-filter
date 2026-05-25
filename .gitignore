@@ -2,6 +2,8 @@
 /netfilterd-arm64
 /netfilterd.exe
 /preview
+/tesla-poc
+/tesla-poc-arm64
 *.db
 *.db-wal
 *.db-shm
