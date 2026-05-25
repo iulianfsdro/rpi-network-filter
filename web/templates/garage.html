@@ -212,6 +212,12 @@
                             <button class="btn" @click="cmd('open-frunk')" :disabled="busy">Frunk</button>
                             <button class="btn" @click="cmd('open-trunk')" :disabled="busy">Trunk</button>
                             <button class="btn" @click="cmd('open-charge-port')" :disabled="busy">Charge port</button>
+                            <button class="btn"
+                                    @click="cmd('homelink')"
+                                    :disabled="busy"
+                                    title="Triggers the Tesla's Homelink relay at the car's current GPS position. If you're parked at a stored Homelink (your garage, gate, etc.), the matching one fires.">
+                                Open garage
+                            </button>
                             <button class="btn ghost" @click="cmd('wake')" :disabled="busy">Wake</button>
                         </div>
                     </div>

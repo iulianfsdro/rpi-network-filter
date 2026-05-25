@@ -273,6 +273,8 @@ func (h *TeslaHandler) Command(w http.ResponseWriter, r *http.Request) {
 		err = h.tesla.SetSentryMode(ctx, userID, true)
 	case "sentry-off":
 		err = h.tesla.SetSentryMode(ctx, userID, false)
+	case "homelink":
+		err = h.tesla.TriggerHomelink(ctx, userID)
 	default:
 		JSONError(w, http.StatusNotFound, "unknown command")
 		return

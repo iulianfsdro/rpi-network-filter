@@ -600,6 +600,62 @@ func (s *TeslaService) SetSentryMode(ctx context.Context, userID int64, on bool)
 	})
 }
 
+// TriggerHomelink fires the car's Homelink relay at its current GPS
+// location. The SDK's TriggerHomelink takes lat/long because the car
+// can have multiple Homelink locations stored (home + office + lake
+// house) and uses the position to pick which one to trigger. Cleanest
+// UX is: don't ask the operator anything — read the car's own current
+// position and pass that through. If the car is parked AT a Homelinked
+// location, it fires that one. If it's nowhere near a Homelink, the
+// relay simply doesn't fire (no harm done).
+//
+// Two BLE operations share one Infotainment session: GetState(Location)
+// then TriggerHomelink. We can't reuse runInfotainmentCommand because
+// that does one fn() call; instead we open the session ourselves with
+// withInfotainment and audit-log the timing around the whole thing.
+func (s *TeslaService) TriggerHomelink(ctx context.Context, userID int64) error {
+	vin, err := s.requireVIN()
+	if err != nil {
+		s.logCommand(userID, "homelink", false, 0, err.Error())
+		return err
+	}
+	start := time.Now()
+	var lat, lng float32
+	runErr := s.withInfotainment(ctx, vin, true, func(car *vehicle.Vehicle) error {
+		locCtx, cancel := context.WithTimeout(ctx, teslaCommandTimeout)
+		defer cancel()
+		loc, err := car.GetState(locCtx, vehicle.StateCategoryLocation)
+		if err != nil {
+			return fmt.Errorf("GetState(location): %w", err)
+		}
+		ls := loc.GetLocationState()
+		if ls == nil {
+			return fmt.Errorf("location state empty — is the car awake?")
+		}
+		lat, lng = ls.GetLatitude(), ls.GetLongitude()
+		if lat == 0 && lng == 0 {
+			return fmt.Errorf("car returned (0,0) for location — GPS not yet fixed")
+		}
+		hlCtx, hlCancel := context.WithTimeout(ctx, teslaCommandTimeout)
+		defer hlCancel()
+		return car.TriggerHomelink(hlCtx, lat, lng)
+	})
+	latency := time.Since(start).Milliseconds()
+	errMsg := ""
+	if runErr != nil {
+		errMsg = runErr.Error()
+	}
+	// Audit name embeds the coordinates so the activity log says
+	// where the trigger fired — useful when the operator has more
+	// than one Homelinked location.
+	auditName := fmt.Sprintf("homelink:%.5f,%.5f", lat, lng)
+	if runErr != nil && lat == 0 && lng == 0 {
+		auditName = "homelink"
+	}
+	s.logCommand(userID, auditName, runErr == nil, latency, errMsg)
+	return runErr
+}
+
 // ── Background poller lifecycle ─────────────────────────────────────
 
 // Start kicks off the background poll loop. Safe to call multiple times
