@@ -1,297 +1,459 @@
-{{define "title"}}Statistics{{end}}
+{{define "title"}}Stats{{end}}
 
 {{define "content"}}
 <div x-data="statsApp()" x-init="load()">
-    <!-- Range selector + top-list search -->
-    <div style="display:flex; gap:0.5rem; margin-bottom:1.2rem; flex-wrap:wrap; align-items:center;">
-        <template x-for="r in ranges" :key="r.value">
-            <button type="button"
-                class="range-btn"
-                :class="range === r.value ? 'active' : 'outline'"
-                @click="range = r.value; load()"
-                x-text="r.label"></button>
-        </template>
-        <div style="flex:1; min-width:200px; position:relative;">
-            <input type="search"
-                placeholder="Filter top lists by domain or IP (e.g. tesla)…"
-                x-model="query"
-                @input.debounce.300ms="loadTopLists()"
-                style="margin:0; padding-right:2rem;">
-            <button type="button"
-                x-show="query"
-                @click="query = ''; loadTopLists()"
-                title="Clear filter"
-                style="position:absolute; right:0.4rem; top:50%; transform:translateY(-50%); background:none; border:none; color:var(--text-muted); cursor:pointer; padding:0.2rem 0.4rem;">×</button>
+    <div class="page-head">
+        <div>
+            <div class="page-head-eyebrow"><strong>Stats</strong> · aggregates</div>
+            <h1 class="page-head-title">Stats</h1>
+            <p class="page-head-sub">
+                Top domains, top clients, requests-per-minute time series. Use to spot anomalies
+                and noisy clients.
+            </p>
         </div>
-        <button type="button" class="outline" @click="load()">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
-            Refresh
-        </button>
+        <div class="page-head-right">
+            <button class="btn" @click="load()">
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M14 8a6 6 0 1 0-2 4.5"/><path d="M14 3v4h-4"/></svg>
+                Refresh
+            </button>
+        </div>
+    </div>
+
+    <!-- Search above the top tables (kept simple — no range chips here, the chart has its own) -->
+    <div class="card" style="overflow:visible; margin-bottom:18px;">
+        <div style="display:flex; gap:14px; align-items:center; padding:14px 22px; flex-wrap:wrap;">
+            <span style="font-size:12.5px; color:var(--fg-mute);">Filter top lists</span>
+            <input class="input" style="flex:1; min-width:240px;" placeholder="Search domain or IP…" x-model="topQuery" @input.debounce.300ms="loadTopLists()">
+        </div>
     </div>
 
     <!-- Summary cards -->
-    <div class="stats-grid">
+    <div class="stat-grid" style="margin-bottom:18px;">
         <div class="stat-card">
-            <div class="stat-label">Total</div>
-            <div class="stat-value" x-text="summary.total || 0"></div>
-            <div class="stat-sub">all entries</div>
-        </div>
-        <div class="stat-card" style="border-color:var(--accent);">
-            <div class="stat-label">DNS Queries</div>
-            <div class="stat-value" x-text="summary.queries || 0" style="color:var(--accent);"></div>
-            <div class="stat-sub">client DNS lookups</div>
-        </div>
-        <div class="stat-card" style="border-color:var(--success);">
-            <div class="stat-label">Allowed</div>
-            <div class="stat-value" x-text="summary.allowed || 0" style="color:var(--success);"></div>
-            <div class="stat-sub">via firewall rules</div>
-        </div>
-        <div class="stat-card" style="border-color:var(--danger);">
-            <div class="stat-label">Blocked</div>
-            <div class="stat-value" x-text="summary.blocked || 0" style="color:var(--danger);"></div>
-            <div class="stat-sub">default deny</div>
+            <div class="stat-card-head">Total events</div>
+            <div class="stat-card-value tnum" x-text="(summary.total || 0).toLocaleString()">0</div>
+            <div class="stat-card-sub"><span>Range</span><strong x-text="chartRange.toUpperCase()"></strong></div>
         </div>
         <div class="stat-card">
-            <div class="stat-label">Domains</div>
-            <div class="stat-value" x-text="summary.unique_domains || 0"></div>
-            <div class="stat-sub">unique seen</div>
+            <div class="stat-card-head">DNS queries</div>
+            <div class="stat-card-value tnum" x-text="(summary.queries || 0).toLocaleString()">0</div>
+            <div class="stat-card-sub"><span>Client lookups</span></div>
         </div>
         <div class="stat-card">
-            <div class="stat-label">Clients</div>
-            <div class="stat-value" x-text="summary.unique_clients || 0"></div>
-            <div class="stat-sub">unique IPs</div>
+            <div class="stat-card-head">Allowed</div>
+            <div class="stat-card-value tnum" style="color:var(--ok);" x-text="(summary.allowed || 0).toLocaleString()">0</div>
+            <div class="stat-card-sub"><span>Via filters</span></div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-card-head">Blocked</div>
+            <div class="stat-card-value danger tnum" x-text="(summary.blocked || 0).toLocaleString()">0</div>
+            <div class="stat-card-sub"><span>Default deny</span></div>
         </div>
     </div>
 
-    <!-- Timeseries chart -->
-    <article>
-        <header><h5 style="margin:0;">Activity Over Time</h5></header>
-        <div style="position:relative; height:260px;">
-            <canvas id="ts-chart"></canvas>
+    <!-- Time-series chart -->
+    <div class="card">
+        <div class="card-head">
+            <div>
+                <div class="card-head-title">Requests per minute</div>
+                <div class="card-head-sub">Query / allowed / blocked over time · hover for details</div>
+            </div>
+            <span class="card-head-spacer"></span>
+            <div class="chip-row" style="padding:3px;">
+                <template x-for="r in ranges" :key="r.id">
+                    <button class="chip" :class="chartRange === r.id ? 'active' : ''" @click="setChartRange(r.id)" x-text="r.label"></button>
+                </template>
+            </div>
         </div>
-    </article>
+        <div class="card-body" style="padding-top:0;">
+            <div class="chart-frame" style="height:280px;">
+                <!-- Legend top-right -->
+                <div class="chart-legend">
+                    <span><span class="chart-legend-swatch" style="background:var(--info);"></span>Query</span>
+                    <span><span class="chart-legend-swatch" style="background:var(--ok);"></span>Allowed</span>
+                    <span><span class="chart-legend-swatch" style="background:var(--danger);"></span>Blocked</span>
+                </div>
 
-    <!-- Top lists -->
-    <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(320px, 1fr)); gap:1rem;">
-        <!-- Top blocked -->
-        <article>
-            <header><h5 style="margin:0;">Top Blocked</h5></header>
-            <table>
-                <thead><tr><th>Destination</th><th style="width:70px; text-align:right;">Count</th><th style="width:80px;"></th></tr></thead>
-                <tbody>
-                    <template x-for="d in topBlocked" :key="d.domain">
-                        <tr>
-                            <td style="font-size:0.85rem; word-break:break-all;" x-text="d.domain"></td>
-                            <td style="text-align:right; color:var(--danger); font-weight:600;" x-text="d.count"></td>
-                            <td><button type="button" class="btn-sm outline" @click="quickAllow(d.domain)">Allow</button></td>
-                        </tr>
-                    </template>
-                </tbody>
-            </table>
-            <p x-show="topBlocked.length === 0" style="color:var(--text-muted); text-align:center; margin:1rem 0;">No blocked traffic yet</p>
-        </article>
+                <!-- Hand-rolled SVG chart.
+                     viewBox MUST be a static attribute, not a `:viewBox` Alpine
+                     binding. The HTML parser lowercases attribute names except
+                     for SVG attributes it recognises during initial parse —
+                     `viewBox` gets case-corrected to camelCase only that one
+                     time. Setting it via setAttribute('viewBox', …) at runtime
+                     (which is what Alpine's `:viewBox` ends up calling, but
+                     against the lowercased directive name) leaves the SVG
+                     without a viewBox, so user-space coords stop matching the
+                     rendered pixel coords — data lives at SVG x∈[40,740] but
+                     the rendered area is the container's full pixel width. -->
+                <svg viewBox="0 0 760 220" preserveAspectRatio="none" class="chart-svg"
+                     @mousemove="onChartMove($event)" @mouseleave="hoverIdx = null"
+                     style="cursor:crosshair;" x-ref="chartSvg">
+                    <defs>
+                        <linearGradient id="ag-c-allowed" x1="0" x2="0" y1="0" y2="1">
+                            <stop offset="0%"   stop-color="var(--ok)"     stop-opacity="0.32"/>
+                            <stop offset="100%" stop-color="var(--ok)"     stop-opacity="0"/>
+                        </linearGradient>
+                        <linearGradient id="ag-c-blocked" x1="0" x2="0" y1="0" y2="1">
+                            <stop offset="0%"   stop-color="var(--danger)" stop-opacity="0.30"/>
+                            <stop offset="100%" stop-color="var(--danger)" stop-opacity="0"/>
+                        </linearGradient>
+                    </defs>
 
-        <!-- Top queries -->
-        <article>
-            <header><h5 style="margin:0;">Top DNS Queries</h5></header>
-            <table>
-                <thead><tr><th>Domain</th><th style="width:70px; text-align:right;">Count</th><th style="width:80px;"></th></tr></thead>
-                <tbody>
-                    <template x-for="d in topQueries" :key="d.domain">
-                        <tr>
-                            <td style="font-size:0.85rem; word-break:break-all;" x-text="d.domain"></td>
-                            <td style="text-align:right; color:var(--accent); font-weight:600;" x-text="d.count"></td>
-                            <td><button type="button" class="btn-sm outline" style="color:var(--danger);" @click="quickBlock(d.domain)">Block</button></td>
-                        </tr>
-                    </template>
-                </tbody>
-            </table>
-            <p x-show="topQueries.length === 0" style="color:var(--text-muted); text-align:center; margin:1rem 0;">No queries yet</p>
-        </article>
+                    <!-- Horizontal grid (5 lines). Geometry is fixed: w=760, h=220,
+                         pad={l:40,r:20,t:18,b:28}. Y positions for t=0,0.25,0.5,0.75,1:
+                         18, 61.5, 105, 148.5, 192. Inlined because <template x-for>
+                         doesn't render inside SVG (HTML parser drops it from the
+                         svg namespace). -->
+                    <line x1="40" x2="740" y1="18"    y2="18"    stroke="var(--line)" stroke-dasharray="2 5"/>
+                    <line x1="40" x2="740" y1="61.5"  y2="61.5"  stroke="var(--line)" stroke-dasharray="2 5"/>
+                    <line x1="40" x2="740" y1="105"   y2="105"   stroke="var(--line)" stroke-dasharray="2 5"/>
+                    <line x1="40" x2="740" y1="148.5" y2="148.5" stroke="var(--line)" stroke-dasharray="2 5"/>
+                    <line x1="40" x2="740" y1="192"   y2="192"   stroke="var(--line)" stroke-dasharray="2 5"/>
 
-        <!-- Top allowed -->
-        <article>
-            <header><h5 style="margin:0;">Top Allowed</h5></header>
-            <table>
-                <thead><tr><th>Destination</th><th style="width:70px; text-align:right;">Count</th></tr></thead>
-                <tbody>
-                    <template x-for="d in topAllowed" :key="d.domain">
-                        <tr>
-                            <td style="font-size:0.85rem; word-break:break-all;" x-text="d.domain"></td>
-                            <td style="text-align:right; color:var(--success); font-weight:600;" x-text="d.count"></td>
-                        </tr>
-                    </template>
-                </tbody>
-            </table>
-            <p x-show="topAllowed.length === 0" style="color:var(--text-muted); text-align:center; margin:1rem 0;">No allowed traffic yet</p>
-        </article>
+                    <!-- Y-axis labels (right-aligned at x=32, hanging next to each grid line) -->
+                    <text x="32" y="21"    text-anchor="end" font-size="10" fill="var(--fg-mute)" style="font-family:Inter;" x-text="Math.round(chart.max)"></text>
+                    <text x="32" y="64.5"  text-anchor="end" font-size="10" fill="var(--fg-mute)" style="font-family:Inter;" x-text="Math.round(0.75 * chart.max)"></text>
+                    <text x="32" y="108"   text-anchor="end" font-size="10" fill="var(--fg-mute)" style="font-family:Inter;" x-text="Math.round(0.5 * chart.max)"></text>
+                    <text x="32" y="151.5" text-anchor="end" font-size="10" fill="var(--fg-mute)" style="font-family:Inter;" x-text="Math.round(0.25 * chart.max)"></text>
+                    <text x="32" y="195"   text-anchor="end" font-size="10" fill="var(--fg-mute)" style="font-family:Inter;">0</text>
 
-        <!-- Top clients -->
-        <article>
-            <header><h5 style="margin:0;">Top Clients</h5></header>
-            <table>
-                <thead><tr><th>Client IP</th><th style="width:70px; text-align:right;">Count</th></tr></thead>
-                <tbody>
-                    <template x-for="c in topClients" :key="c.client">
-                        <tr>
-                            <td><code x-text="c.client"></code></td>
-                            <td style="text-align:right; font-weight:600;" x-text="c.count"></td>
-                        </tr>
+                    <!-- X-axis labels at quarter intervals. X positions are static
+                         (40, 215, 390, 565, 740) because xs(i) only depends on
+                         normalised position within [pad.l, w - pad.r], not on
+                         points.length. The LABEL text is dynamic via xLabel(i)
+                         which knows the range step. -->
+                    <text x="40"  y="210" text-anchor="middle" font-size="10" fill="var(--fg-mute)" style="font-family:Inter;" x-text="chart.xLabel(0)"></text>
+                    <text x="215" y="210" text-anchor="middle" font-size="10" fill="var(--fg-mute)" style="font-family:Inter;" x-text="chart.xLabel(Math.round((chart.points.length - 1) * 0.25))"></text>
+                    <text x="390" y="210" text-anchor="middle" font-size="10" fill="var(--fg-mute)" style="font-family:Inter;" x-text="chart.xLabel(Math.round((chart.points.length - 1) * 0.5))"></text>
+                    <text x="565" y="210" text-anchor="middle" font-size="10" fill="var(--fg-mute)" style="font-family:Inter;" x-text="chart.xLabel(Math.round((chart.points.length - 1) * 0.75))"></text>
+                    <text x="740" y="210" text-anchor="middle" font-size="10" fill="var(--fg-mute)" style="font-family:Inter;" x-text="chart.xLabel(chart.points.length - 1)"></text>
+
+                    <!-- Area fills -->
+                    <path :d="chart.areaPath('allowed')" fill="url(#ag-c-allowed)"/>
+                    <path :d="chart.areaPath('blocked')" fill="url(#ag-c-blocked)"/>
+
+                    <!-- Line strokes -->
+                    <path :d="chart.linePath('queries')" fill="none" stroke="var(--info)"   stroke-width="1.6"/>
+                    <path :d="chart.linePath('allowed')" fill="none" stroke="var(--ok)"     stroke-width="1.8"/>
+                    <path :d="chart.linePath('blocked')" fill="none" stroke="var(--danger)" stroke-width="1.8"/>
+
+                    <!-- Hover guide (dashed vertical) + dots on each series. Use
+                         <g x-show> not <template x-if> — <template> doesn't render
+                         inside SVG, but <g> with x-show toggles display style. -->
+                    <g x-show="hoverIdx !== null && chart.points.length">
+                        <line :x1="chart.xs(hoverIdx || 0)" :x2="chart.xs(hoverIdx || 0)"
+                              :y1="chart.pad.t" :y2="chart.h - chart.pad.b"
+                              stroke="var(--fg)" stroke-width="0.6" stroke-dasharray="3 3" opacity="0.5"/>
+                        <circle :cx="chart.xs(hoverIdx || 0)" :cy="chart.ys((chart.points[hoverIdx || 0] || {}).queries || 0)" r="3.5" fill="var(--info)"   stroke="var(--bg-elev)" stroke-width="1.5"/>
+                        <circle :cx="chart.xs(hoverIdx || 0)" :cy="chart.ys((chart.points[hoverIdx || 0] || {}).allowed || 0)" r="3.5" fill="var(--ok)"     stroke="var(--bg-elev)" stroke-width="1.5"/>
+                        <circle :cx="chart.xs(hoverIdx || 0)" :cy="chart.ys((chart.points[hoverIdx || 0] || {}).blocked || 0)" r="3.5" fill="var(--danger)" stroke="var(--bg-elev)" stroke-width="1.5"/>
+                    </g>
+                </svg>
+
+                <!-- Floating tooltip -->
+                <div class="chart-tooltip" x-show="hoverIdx !== null" x-cloak
+                     :style="tooltipStyle()">
+                    <div class="chart-tooltip-time" x-text="hoverIdx !== null ? chart.timeLabel(hoverIdx) : ''"></div>
+                    <template x-if="hoverIdx !== null && chart.points[hoverIdx]">
+                        <div>
+                            <div class="chart-tooltip-row"><span><span class="chart-tooltip-dot" style="background:var(--info);"></span>Query</span><strong class="tnum" x-text="chart.points[hoverIdx].queries"></strong></div>
+                            <div class="chart-tooltip-row"><span><span class="chart-tooltip-dot" style="background:var(--ok);"></span>Allowed</span><strong class="tnum" x-text="chart.points[hoverIdx].allowed"></strong></div>
+                            <div class="chart-tooltip-row"><span><span class="chart-tooltip-dot" style="background:var(--danger);"></span>Blocked</span><strong class="tnum" x-text="chart.points[hoverIdx].blocked"></strong></div>
+                        </div>
                     </template>
-                </tbody>
-            </table>
-            <p x-show="topClients.length === 0" style="color:var(--text-muted); text-align:center; margin:1rem 0;">No clients yet</p>
-        </article>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Top tables -->
+    <div class="section-head">
+        <div>
+            <div class="section-head-title">Top blocked</div>
+            <div class="section-head-sub">Highest-traffic blocked destinations</div>
+        </div>
+    </div>
+    <div class="card">
+        <table class="tbl">
+            <thead><tr><th>Destination</th><th class="right" style="width:120px;">Count</th><th class="right" style="width:110px;"></th></tr></thead>
+            <tbody>
+                <template x-for="d in topBlocked" :key="d.domain">
+                    <tr>
+                        <td><span class="cell-primary" x-text="d.domain"></span></td>
+                        <td class="right cell-mac" x-text="d.count.toLocaleString()"></td>
+                        <td class="actions"><button class="btn sm" @click="quickAllow(d.domain)">+ Allow</button></td>
+                    </tr>
+                </template>
+                <template x-if="topBlocked.length === 0">
+                    <tr><td colspan="3" style="text-align:center; color:var(--fg-mute); padding:22px;">No blocked traffic yet.</td></tr>
+                </template>
+            </tbody>
+        </table>
+    </div>
+
+    <div class="section-head">
+        <div>
+            <div class="section-head-title">Top DNS queries</div>
+            <div class="section-head-sub">Highest-traffic resolved hostnames</div>
+        </div>
+    </div>
+    <div class="card">
+        <table class="tbl">
+            <thead><tr><th>Domain</th><th class="right" style="width:120px;">Count</th><th class="right" style="width:110px;"></th></tr></thead>
+            <tbody>
+                <template x-for="d in topQueries" :key="d.domain">
+                    <tr>
+                        <td><span class="cell-primary" x-text="d.domain"></span></td>
+                        <td class="right cell-mac" x-text="d.count.toLocaleString()"></td>
+                        <td class="actions"><button class="btn sm ghost" @click="quickMute(d.domain)">Mute</button></td>
+                    </tr>
+                </template>
+                <template x-if="topQueries.length === 0">
+                    <tr><td colspan="3" style="text-align:center; color:var(--fg-mute); padding:22px;">No queries yet.</td></tr>
+                </template>
+            </tbody>
+        </table>
+    </div>
+
+    <div class="section-head">
+        <div>
+            <div class="section-head-title">Top allowed</div>
+            <div class="section-head-sub">Highest-traffic permitted destinations</div>
+        </div>
+    </div>
+    <div class="card">
+        <table class="tbl">
+            <thead><tr><th>Destination</th><th class="right" style="width:120px;">Count</th></tr></thead>
+            <tbody>
+                <template x-for="d in topAllowed" :key="d.domain">
+                    <tr>
+                        <td><span class="cell-primary" x-text="d.domain"></span></td>
+                        <td class="right cell-mac" x-text="d.count.toLocaleString()"></td>
+                    </tr>
+                </template>
+                <template x-if="topAllowed.length === 0">
+                    <tr><td colspan="2" style="text-align:center; color:var(--fg-mute); padding:22px;">No allowed traffic yet.</td></tr>
+                </template>
+            </tbody>
+        </table>
+    </div>
+
+    <div class="section-head">
+        <div>
+            <div class="section-head-title">Top clients</div>
+            <div class="section-head-sub">Most-active client IPs by request volume</div>
+        </div>
+    </div>
+    <div class="card">
+        <table class="tbl">
+            <thead><tr><th>Client IP</th><th class="right" style="width:120px;">Count</th></tr></thead>
+            <tbody>
+                <template x-for="c in topClients" :key="c.client">
+                    <tr>
+                        <td class="cell-mac" x-text="c.client"></td>
+                        <td class="right cell-mac" x-text="c.count.toLocaleString()"></td>
+                    </tr>
+                </template>
+                <template x-if="topClients.length === 0">
+                    <tr><td colspan="2" style="text-align:center; color:var(--fg-mute); padding:22px;">No clients yet.</td></tr>
+                </template>
+            </tbody>
+        </table>
     </div>
 </div>
 {{end}}
 
 {{define "scripts"}}
-<script src="/static/js/chart.min.js"></script>
 <script>
+// ── Range configs for the time-series chart ────────────────────────
+// The X-axis label format and the tooltip's "N min ago" text are derived
+// from these. The `points` count is a target — if the backend returns
+// fewer, the chart just scales accordingly.
+const CHART_RANGES = [
+    { id: '60m', label: '60m', points: 60,  stepMin: 1     },
+    { id: '24h', label: '24h', points: 96,  stepMin: 15    },
+    { id: '7d',  label: '7d',  points: 168, stepMin: 60    },
+    { id: '30d', label: '30d', points: 180, stepMin: 4*60  },
+];
+
 function statsApp() {
     return {
-        range: '24h',
-        ranges: [
-            { value: '1h',  label: '1H' },
-            { value: '24h', label: '24H' },
-            { value: '7d',  label: '7D' },
-            { value: '30d', label: '30D' },
-            { value: 'all', label: 'All' },
-        ],
-        query: '',
+        // Top-list state (independent of the chart range)
+        topQuery: '',
         topLimit: 50,
-        summary: {},
         topBlocked: [],
         topAllowed: [],
         topQueries: [],
         topClients: [],
-        chart: null,
+        summary: {},
 
-        // Full refresh — summary + top lists + chart. Triggered on first
-        // load and whenever the time range changes.
-        async load() {
-            const r = '?range=' + this.range;
-            const [summary, ts] = await Promise.all([
-                api.get('/api/system/stats/summary' + r),
-                api.get('/api/system/stats/timeseries' + r),
-            ]);
-            this.summary = summary;
-            this.renderChart(ts || []);
-            await this.loadTopLists();
+        // Chart state — separate range from the top-list filter
+        ranges: CHART_RANGES,
+        chartRange: '60m',
+        chart: {
+            // Stub populated by loadChart(); template safely references all
+            // these before data arrives because each fn is callable.
+            w: 760, h: 220, pad: { l: 40, r: 20, t: 18, b: 28 }, max: 1,
+            points: [], labelTicks: [],
+            xs: () => 0, ys: () => 0,
+            linePath: () => '', areaPath: () => '',
+            xLabel: () => '', timeLabel: () => '',
         },
+        hoverIdx: null,
 
-        // Top lists only — re-runs whenever the search box changes so the
-        // user gets sub-second feedback while typing without re-fetching
-        // the chart/summary on every keystroke.
-        async loadTopLists() {
-            const params = new URLSearchParams({ range: this.range, limit: String(this.topLimit) });
-            if (this.query) params.set('q', this.query);
-            const base = '/api/system/stats/top-domains?';
-            const [blocked, allowed, queries, clients] = await Promise.all([
-                api.get(base + params + '&action=blocked'),
-                api.get(base + params + '&action=allowed'),
-                api.get(base + params + '&action=query'),
-                // Top Clients also gets the bumped limit; client_ip search
-                // would be unhelpful (substring of an IP), so q isn't sent.
-                api.get('/api/system/stats/top-clients?range=' + this.range + '&limit=' + this.topLimit),
-            ]);
-            this.topBlocked = blocked || [];
-            this.topAllowed = allowed || [];
-            this.topQueries = queries || [];
-            this.topClients = clients || [];
-        },
+        _chartFor(cfg, points) {
+            const w = 760, h = 220, pad = { l: 40, r: 20, t: 18, b: 28 };
 
-        renderChart(points) {
-            const ctx = document.getElementById('ts-chart');
-            if (!ctx) return;
+            // Y-axis upper bound: cap at the 95th percentile of all observed
+            // values so a single outlier minute doesn't squash the rest of
+            // the chart into a flat line at the bottom. The actual point still
+            // renders at its real Y; the rendering clips at `max` only via
+            // visual rounding (ys returns out-of-range values without error).
+            const vals = points.flatMap(p => [p.queries || 0, p.allowed || 0, p.blocked || 0]);
+            const sorted = vals.slice().sort((a, b) => a - b);
+            const p95 = sorted.length ? sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.95))] : 0;
+            const max = Math.max(1, p95);
+            const last = Math.max(1, points.length - 1);
+            const xs = (i) => pad.l + (i / last) * (w - pad.l - pad.r);
+            const ys = (v) => pad.t + (1 - v / max) * (h - pad.t - pad.b);
 
-            const labels = points.map(p => p.time);
-            const queries = points.map(p => p.queries);
-            const allowed = points.map(p => p.allowed);
-            const blocked = points.map(p => p.blocked);
-
-            if (this.chart) {
-                this.chart.data.labels = labels;
-                this.chart.data.datasets[0].data = queries;
-                this.chart.data.datasets[1].data = allowed;
-                this.chart.data.datasets[2].data = blocked;
-                this.chart.update();
-                return;
-            }
-
-            this.chart = new Chart(ctx, {
-                type: 'line',
-                data: {
-                    labels,
-                    datasets: [
-                        {
-                            label: 'DNS Queries',
-                            data: queries,
-                            borderColor: '#6366f1',
-                            backgroundColor: 'rgba(99,102,241,0.15)',
-                            tension: 0.3,
-                            fill: true,
-                        },
-                        {
-                            label: 'Allowed',
-                            data: allowed,
-                            borderColor: '#10b981',
-                            backgroundColor: 'rgba(16,185,129,0.15)',
-                            tension: 0.3,
-                            fill: true,
-                        },
-                        {
-                            label: 'Blocked',
-                            data: blocked,
-                            borderColor: '#ef4444',
-                            backgroundColor: 'rgba(239,68,68,0.15)',
-                            tension: 0.3,
-                            fill: true,
-                        },
-                    ]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    interaction: { intersect: false, mode: 'index' },
-                    plugins: {
-                        legend: { labels: { color: '#9ca3af' } },
-                    },
-                    scales: {
-                        x: {
-                            ticks: { color: '#9ca3af', maxRotation: 0, autoSkip: true, maxTicksLimit: 10 },
-                            grid: { color: '#374151' },
-                        },
-                        y: {
-                            beginAtZero: true,
-                            ticks: { color: '#9ca3af' },
-                            grid: { color: '#374151' },
-                        }
-                    }
+            // Smooth Catmull-Rom → cubic Bezier path. Each segment from p[i] to
+            // p[i+1] gets two control points derived from p[i-1] and p[i+2]
+            // (clamped at the endpoints), so the curve passes through every
+            // data point but the visual is smooth. Tension 1 / divisor 6
+            // matches the standard Catmull-Rom-to-Bezier formula and is the
+            // same smoothing most charting libraries use.
+            const buildLine = (key) => {
+                if (!points.length) return '';
+                const pts = points.map((p, i) => ({ x: xs(i), y: ys(p[key] || 0) }));
+                if (pts.length === 1) return `M${pts[0].x.toFixed(2)},${pts[0].y.toFixed(2)}`;
+                const out = [`M${pts[0].x.toFixed(2)},${pts[0].y.toFixed(2)}`];
+                for (let i = 0; i < pts.length - 1; i++) {
+                    const p0 = pts[Math.max(0, i - 1)];
+                    const p1 = pts[i];
+                    const p2 = pts[i + 1];
+                    const p3 = pts[Math.min(pts.length - 1, i + 2)];
+                    const cp1x = p1.x + (p2.x - p0.x) / 6;
+                    const cp1y = p1.y + (p2.y - p0.y) / 6;
+                    const cp2x = p2.x - (p3.x - p1.x) / 6;
+                    const cp2y = p2.y - (p3.y - p1.y) / 6;
+                    out.push(`C${cp1x.toFixed(2)},${cp1y.toFixed(2)} ${cp2x.toFixed(2)},${cp2y.toFixed(2)} ${p2.x.toFixed(2)},${p2.y.toFixed(2)}`);
                 }
-            });
+                return out.join(' ');
+            };
+            const linePath = buildLine;
+            const areaPath = (key) => {
+                const lp = buildLine(key);
+                if (!lp) return '';
+                return `${lp} L${xs(last).toFixed(2)},${h - pad.b} L${xs(0).toFixed(2)},${h - pad.b} Z`;
+            };
+
+            const labelTicks = points.length ? [0, Math.round(last * 0.25), Math.round(last * 0.5), Math.round(last * 0.75), last] : [];
+
+            const xLabel = (i) => {
+                const minutesAgo = (last - i) * cfg.stepMin;
+                if (cfg.id === '60m') return `−${minutesAgo}m`;
+                if (cfg.id === '24h') return `−${Math.round(minutesAgo / 60)}h`;
+                return `−${Math.round(minutesAgo / (60 * 24))}d`;
+            };
+            const timeLabel = (i) => {
+                const minutesAgo = (last - i) * cfg.stepMin;
+                if (minutesAgo <= 0) return 'now';
+                if (minutesAgo < 60) return `${minutesAgo} min ago`;
+                if (minutesAgo < 60 * 24) {
+                    const h = Math.round(minutesAgo / 60);
+                    return `${h} hour${h === 1 ? '' : 's'} ago`;
+                }
+                const d = Math.round(minutesAgo / (60 * 24));
+                return `${d} day${d === 1 ? '' : 's'} ago`;
+            };
+
+            return { w, h, pad, max, xs, ys, linePath, areaPath, labelTicks, xLabel, timeLabel, points, cfg };
+        },
+
+        async load() {
+            await Promise.all([this.loadChart(), this.loadTopLists()]);
+        },
+
+        async loadChart() {
+            try {
+                const r = '?range=' + this.chartRange;
+                const [summary, pts] = await Promise.all([
+                    api.get('/api/system/stats/summary' + r),
+                    api.get('/api/system/stats/timeseries' + r),
+                ]);
+                this.summary = summary || {};
+                const cfg = CHART_RANGES.find(x => x.id === this.chartRange) || CHART_RANGES[0];
+                // Normalise field names — backend returns {queries, allowed, blocked}; the
+                // chart expects queries (matches). If we ever rename, normalise here.
+                const points = (pts || []).map(p => ({
+                    queries: p.queries || 0,
+                    allowed: p.allowed || 0,
+                    blocked: p.blocked || 0,
+                    time:    p.time || '',
+                }));
+                this.chart = this._chartFor(cfg, points);
+            } catch(e) {}
+        },
+
+        async loadTopLists() {
+            const params = new URLSearchParams({ range: this.chartRange, limit: String(this.topLimit) });
+            if (this.topQuery) params.set('q', this.topQuery);
+            const base = '/api/system/stats/top-domains?';
+            try {
+                const [blocked, allowed, queries, clients] = await Promise.all([
+                    api.get(base + params + '&action=blocked'),
+                    api.get(base + params + '&action=allowed'),
+                    api.get(base + params + '&action=query'),
+                    api.get('/api/system/stats/top-clients?range=' + this.chartRange + '&limit=' + this.topLimit),
+                ]);
+                this.topBlocked = blocked || [];
+                this.topAllowed = allowed || [];
+                this.topQueries = queries || [];
+                this.topClients = clients || [];
+            } catch(e) {}
+        },
+
+        async setChartRange(id) {
+            this.chartRange = id;
+            this.hoverIdx = null;
+            await this.load();
+        },
+
+        onChartMove(ev) {
+            const svg = this.$refs.chartSvg;
+            if (!svg || !this.chart.points.length) return;
+            const rect = svg.getBoundingClientRect();
+            const xRatio = (ev.clientX - rect.left) / rect.width;
+            const xPx = xRatio * this.chart.w;
+            const t = (xPx - this.chart.pad.l) / (this.chart.w - this.chart.pad.l - this.chart.pad.r);
+            const last = this.chart.points.length - 1;
+            const idx = Math.max(0, Math.min(last, Math.round(t * last)));
+            this.hoverIdx = idx;
+        },
+
+        tooltipStyle() {
+            if (this.hoverIdx === null) return '';
+            const tipX = this.chart.xs(this.hoverIdx);
+            const ratio = tipX / this.chart.w;
+            // Flip to the left of the cursor when nearing the right edge so the
+            // tooltip never clips out of the card.
+            const anchorRight = ratio > 0.6;
+            if (anchorRight) return `right: calc(${(1 - ratio) * 100}% + 12px); left: auto;`;
+            return `left: calc(${ratio * 100}% + 12px); right: auto;`;
         },
 
         async quickAllow(domain) {
-            await api.post('/api/firewall/rules', {
-                description: 'Allow ' + domain,
-                direction: 'forward',
-                protocol: 'all',
-                dest_port: '',
-                dest_ip: domain,
-                action: 'accept',
-                device_mac: '',
-                enabled: true,
-                priority: 100
-            });
-            notify('Allow rule added for ' + domain, 'success');
+            // Pivot to the Traffic page so the operator goes through the same
+            // safety-gated Allow → pick-filter dialog.
+            window.location = '/traffic?q=' + encodeURIComponent(domain);
         },
-
-        async quickBlock(domain) {
-            await api.post('/api/dns/blocklist', { domain, category: 'manual' });
-            notify('Blocked: ' + domain, 'success');
-        }
+        async quickMute(domain) {
+            try {
+                await api.post('/api/system/traffic/muted', { domain });
+                notify('Muted ' + domain + ' — firewall behaviour unchanged', 'success');
+            } catch(e) {}
+        },
     };
 }
 </script>

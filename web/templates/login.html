@@ -3,36 +3,47 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>NetFilter - Login</title>
-    <link rel="stylesheet" href="/static/css/pico.min.css">
+    <title>Sign in — airgap</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/static/css/app.css">
 </head>
 <body>
-    <main class="container" x-data="loginApp()" style="max-width: 420px; margin-top: 10vh;">
-        <article>
-            <header>
-                <h2 style="margin-bottom: 0;">NetFilter</h2>
-                <small>Router Management</small>
-            </header>
+    <div class="login-screen" x-data="loginApp()">
+        <form class="login-card" @submit.prevent="login()">
+            <div class="login-mark">
+                <span class="rail-brand-glyph" style="width:30px; height:30px;"></span>
+                <div>
+                    <h1 class="login-title">airgap</h1>
+                    <div style="font-size:11px; color:var(--fg-mute); margin-top:2px;">netfilterd</div>
+                </div>
+            </div>
+            <div class="login-sub">
+                Sign in to <strong style="color:var(--fg);">netfilterd-01</strong>. The Guardian is
+                currently active — sessions are scoped to the operator account.
+            </div>
+            <div class="field">
+                <label class="label">Operator</label>
+                <input class="input" type="text" x-model="username" placeholder="admin" required autofocus>
+            </div>
+            <div class="field">
+                <label class="label">Passphrase</label>
+                <input class="input" type="password" x-model="password" placeholder="•••••••••••••" required>
+                <div class="field-help" x-show="error" style="color:var(--danger);">● <span x-text="error"></span></div>
+            </div>
+            <button class="btn primary" type="submit" style="width:100%; justify-content:center; padding:12px 16px;" :disabled="loading">
+                <span x-show="!loading">Sign in</span>
+                <span x-show="loading">Signing in…</span>
+            </button>
+            <div class="login-foot">
+                <span>192.168.4.1:8443</span>
+                <span>Self-signed certificate</span>
+            </div>
+        </form>
+    </div>
 
-            <form @submit.prevent="login()">
-                <label>
-                    Username
-                    <input type="text" x-model="username" placeholder="admin" required autofocus>
-                </label>
-                <label>
-                    Password
-                    <input type="password" x-model="password" placeholder="Password" required>
-                </label>
-                <button type="submit" :aria-busy="loading" :disabled="loading">
-                    <span x-show="!loading">Sign In</span>
-                    <span x-show="loading">Signing in...</span>
-                </button>
-            </form>
-
-            <p x-show="error" x-text="error" style="color: var(--pico-color-red-500); text-align: center;"></p>
-        </article>
-    </main>
+    <div id="toast-container"></div>
 
     <script src="/static/js/alpine.min.js" defer></script>
     <script src="/static/js/app.js"></script>
@@ -49,7 +60,7 @@
                 try {
                     await api.post('/api/login', {
                         username: this.username,
-                        password: this.password
+                        password: this.password,
                     });
                     window.location = '/';
                 } catch (e) {
@@ -57,7 +68,7 @@
                 } finally {
                     this.loading = false;
                 }
-            }
+            },
         };
     }
     </script>

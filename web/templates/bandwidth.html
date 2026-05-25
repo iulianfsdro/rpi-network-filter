@@ -1,84 +1,118 @@
-{{define "title"}}Bandwidth Control{{end}}
+{{define "title"}}Bandwidth{{end}}
 
 {{define "content"}}
 <div x-data="bandwidthApp()" x-init="load()">
-    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem;">
-        <p style="margin:0; color:var(--pico-muted-color);">
-            <span x-text="limits.length"></span> bandwidth limits configured
-        </p>
-        <button @click="showAdd = !showAdd">+ Add Limit</button>
+    <div class="page-head">
+        <div>
+            <div class="page-head-eyebrow"><strong>QoS</strong> · per-MAC rate limits</div>
+            <h1 class="page-head-title">Bandwidth</h1>
+            <p class="page-head-sub">
+                Per-MAC ingress / egress rate limits via <code>tc</code> on <code>wlan0</code>.
+                CRUD wrapper — changes apply on save.
+            </p>
+        </div>
+        <div class="page-head-right">
+            <button class="btn primary" @click="showAdd = !showAdd">
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M8 3v10M3 8h10"/></svg>
+                <span x-text="showAdd ? 'Cancel' : 'Add limit'"></span>
+            </button>
+        </div>
     </div>
 
-    <!-- Add limit form -->
-    <article x-show="showAdd" x-transition>
-        <header><h5 style="margin:0;">New Bandwidth Limit</h5></header>
-        <div class="grid">
-            <label>
-                Device
-                <select x-model="form.device_mac">
-                    <option value="">-- Select device --</option>
-                    <template x-for="d in devices" :key="d.mac_address">
-                        <option :value="d.mac_address" x-text="(d.alias || d.hostname || d.mac_address) + ' (' + d.ip_address + ')'"></option>
-                    </template>
-                </select>
-            </label>
+    <!-- Add form -->
+    <div class="card" x-show="showAdd" x-cloak>
+        <div class="card-head">
+            <div>
+                <div class="card-head-title">New limit</div>
+                <div class="card-head-sub">Picked from currently-leased devices.</div>
+            </div>
         </div>
-        <div class="grid">
-            <label>
-                Download Limit (Kbps)
-                <input type="number" x-model.number="form.download_kbps" placeholder="e.g. 5000 = 5 Mbps">
-                <small x-text="(form.download_kbps / 1000).toFixed(1) + ' Mbps'"></small>
-            </label>
-            <label>
-                Upload Limit (Kbps)
-                <input type="number" x-model.number="form.upload_kbps" placeholder="e.g. 2000 = 2 Mbps">
-                <small x-text="(form.upload_kbps / 1000).toFixed(1) + ' Mbps'"></small>
-            </label>
-        </div>
-        <footer>
-            <button class="outline secondary" @click="showAdd = false">Cancel</button>
-            <button @click="addLimit()">Save</button>
-        </footer>
-    </article>
-
-    <!-- Limits table -->
-    <table>
-        <thead>
-            <tr>
-                <th>Device</th>
-                <th>Download</th>
-                <th>Upload</th>
-                <th>Enabled</th>
-                <th>Actions</th>
-            </tr>
-        </thead>
-        <tbody>
-            <template x-for="l in limits" :key="l.id">
-                <tr>
-                    <td>
-                        <code x-text="l.device_mac" style="font-size:0.85rem;"></code>
-                        <template x-if="deviceName(l.device_mac)">
-                            <br><small x-text="deviceName(l.device_mac)"></small>
+        <div class="card-body">
+            <div class="row stretch" style="gap:14px;">
+                <div class="field" style="flex:2;">
+                    <label class="label">Device</label>
+                    <select class="select" x-model="form.device_mac">
+                        <option value="">— select device —</option>
+                        <template x-for="d in devices" :key="d.mac_address">
+                            <option :value="d.mac_address" x-text="(d.alias || d.hostname || d.mac_address) + ' · ' + d.ip_address"></option>
                         </template>
-                    </td>
-                    <td x-text="(l.download_kbps / 1000).toFixed(1) + ' Mbps'"></td>
-                    <td x-text="(l.upload_kbps / 1000).toFixed(1) + ' Mbps'"></td>
-                    <td>
-                        <label class="toggle" @click.prevent="toggleLimit(l)">
-                            <input type="checkbox" :checked="l.enabled">
-                            <span class="toggle-slider"></span>
-                        </label>
-                    </td>
-                    <td>
-                        <button class="outline btn-sm" style="color:var(--danger);" @click="deleteLimit(l.id)">Delete</button>
-                    </td>
-                </tr>
-            </template>
-        </tbody>
-    </table>
-    <p x-show="limits.length === 0" style="text-align:center; color:var(--pico-muted-color);">
-        No bandwidth limits set. Devices with allowed firewall rules have unlimited bandwidth.
-    </p>
+                    </select>
+                </div>
+                <div class="field" style="flex:1;">
+                    <label class="label">Download · kbps</label>
+                    <input class="input" type="number" x-model.number="form.download_kbps" placeholder="5000">
+                    <div class="field-help" x-text="(form.download_kbps / 1000).toFixed(1) + ' Mbps'"></div>
+                </div>
+                <div class="field" style="flex:1;">
+                    <label class="label">Upload · kbps</label>
+                    <input class="input" type="number" x-model.number="form.upload_kbps" placeholder="2000">
+                    <div class="field-help" x-text="(form.upload_kbps / 1000).toFixed(1) + ' Mbps'"></div>
+                </div>
+                <div style="display:flex; align-items:flex-end; gap:8px;">
+                    <button class="btn ghost" @click="showAdd = false">Cancel</button>
+                    <button class="btn primary" @click="addLimit()">Save</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="card-head">
+            <div>
+                <div class="card-head-title">Active limits</div>
+                <div class="card-head-sub"><span x-text="limits.length"></span> configured</div>
+            </div>
+        </div>
+        <div class="card-body tight">
+            <table class="tbl">
+                <thead>
+                    <tr>
+                        <th style="width:60px;">On</th>
+                        <th>Device</th>
+                        <th style="width:240px;">Download</th>
+                        <th style="width:240px;">Upload</th>
+                        <th class="right" style="width:110px;"></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <template x-for="l in limits" :key="l.id">
+                        <tr>
+                            <td>
+                                <label class="toggle">
+                                    <input type="checkbox" :checked="l.enabled" @change="toggleLimit(l)">
+                                    <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                                </label>
+                            </td>
+                            <td>
+                                <span class="cell-primary" x-text="deviceName(l.device_mac) || 'Unknown'"></span>
+                                <div class="cell-sub cell-mac" x-text="l.device_mac"></div>
+                            </td>
+                            <td>
+                                <div class="bar-cell">
+                                    <div class="bar-track"><div class="bar-fill" :style="`width:${Math.min(100, l.download_kbps / 40000 * 100)}%`"></div></div>
+                                    <div class="bar-label" x-text="(l.download_kbps / 1000).toFixed(1) + ' Mbps'"></div>
+                                </div>
+                            </td>
+                            <td>
+                                <div class="bar-cell">
+                                    <div class="bar-track"><div class="bar-fill" :style="`width:${Math.min(100, l.upload_kbps / 40000 * 100)}%`"></div></div>
+                                    <div class="bar-label" x-text="(l.upload_kbps / 1000).toFixed(1) + ' Mbps'"></div>
+                                </div>
+                            </td>
+                            <td class="actions">
+                                <button class="btn-icon danger" @click="deleteLimit(l.id)" title="Remove">
+                                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 3l10 10M13 3L3 13"/></svg>
+                                </button>
+                            </td>
+                        </tr>
+                    </template>
+                    <template x-if="limits.length === 0">
+                        <tr><td colspan="5" style="text-align:center; color:var(--fg-mute); padding:22px;">No bandwidth limits set. Devices have unlimited throughput by default.</td></tr>
+                    </template>
+                </tbody>
+            </table>
+        </div>
+    </div>
 </div>
 {{end}}
 
@@ -91,8 +125,8 @@ function bandwidthApp() {
         showAdd: false,
         form: { device_mac: '', download_kbps: 5000, upload_kbps: 2000, enabled: true },
         async load() {
-            this.limits = await api.get('/api/bandwidth/limits');
-            this.devices = await api.get('/api/devices');
+            this.limits  = (await api.get('/api/bandwidth/limits')) || [];
+            this.devices = (await api.get('/api/devices')) || [];
         },
         deviceName(mac) {
             const d = this.devices.find(d => d.mac_address === mac);
@@ -100,11 +134,13 @@ function bandwidthApp() {
         },
         async addLimit() {
             if (!this.form.device_mac) { notify('Select a device', 'error'); return; }
-            await api.post('/api/bandwidth/limits', this.form);
-            notify('Bandwidth limit added', 'success');
-            this.showAdd = false;
-            this.form = { device_mac: '', download_kbps: 5000, upload_kbps: 2000, enabled: true };
-            this.load();
+            try {
+                await api.post('/api/bandwidth/limits', this.form);
+                notify('Bandwidth limit added', 'success');
+                this.showAdd = false;
+                this.form = { device_mac: '', download_kbps: 5000, upload_kbps: 2000, enabled: true };
+                this.load();
+            } catch(e) {}
         },
         async toggleLimit(l) {
             l.enabled = !l.enabled;
@@ -113,7 +149,7 @@ function bandwidthApp() {
                     device_mac: l.device_mac,
                     download_kbps: l.download_kbps,
                     upload_kbps: l.upload_kbps,
-                    enabled: l.enabled
+                    enabled: l.enabled,
                 });
                 notify(l.enabled ? 'Limit enabled' : 'Limit disabled', 'success');
             } catch(e) {
@@ -122,10 +158,12 @@ function bandwidthApp() {
         },
         async deleteLimit(id) {
             if (!confirm('Remove this bandwidth limit?')) return;
-            await api.delete('/api/bandwidth/limits/' + id);
-            notify('Limit removed', 'success');
-            this.load();
-        }
+            try {
+                await api.delete('/api/bandwidth/limits/' + id);
+                notify('Limit removed', 'success');
+                this.load();
+            } catch(e) {}
+        },
     };
 }
 </script>
