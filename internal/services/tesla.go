@@ -26,6 +26,7 @@ package services
 
 import (
 	"context"
+	"crypto/ecdh"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -44,6 +45,7 @@ import (
 	"github.com/teslamotors/vehicle-command/pkg/connector/ble"
 	"github.com/teslamotors/vehicle-command/pkg/protocol"
 	"github.com/teslamotors/vehicle-command/pkg/protocol/protobuf/carserver"
+	keysproto "github.com/teslamotors/vehicle-command/pkg/protocol/protobuf/keys"
 	universal "github.com/teslamotors/vehicle-command/pkg/protocol/protobuf/universalmessage"
 	"github.com/teslamotors/vehicle-command/pkg/protocol/protobuf/vcsec"
 	"github.com/teslamotors/vehicle-command/pkg/vehicle"
@@ -253,9 +255,66 @@ func (s *TeslaService) IsPaired() bool {
 	return err == nil && paired == 1
 }
 
-// ConfirmPairing tries a VCSEC session against the configured VIN and,
-// on success, marks the operator as paired. Called from /api/tesla/pair
-// after the user enrols the public key in the Tesla mobile app.
+// RequestPairing sends an add-key-request over BLE — the unauthenticated
+// pairing protocol the Tesla expects for a new key.
+//
+// The actual flow is *not* "paste a PEM into the Tesla mobile app." It
+// is:
+//
+//   1. The Pi opens an anonymous BLE connection to the car (no signed
+//      session — this request is allowed without auth, on purpose,
+//      because there is no key yet that COULD sign it).
+//   2. We send the public key + role + form-factor. The SDK marshals
+//      it into a VCSEC ToVCSECMessage with SIGNATURE_TYPE_PRESENT_KEY
+//      (= "this is a new key I'm presenting").
+//   3. The car displays a prompt on the centre console: "<role> key
+//      wants to be added — tap your NFC card to approve."
+//   4. The operator taps their physical NFC key card on the centre
+//      console reader, then confirms intent on the touchscreen.
+//   5. The car enrols the key. From this moment, signed VCSEC sessions
+//      against our key succeed — which is exactly what ConfirmPairing
+//      polls for below.
+//
+// SendAddKeyRequest returns immediately after step 2 — a nil return
+// does NOT mean the key is enrolled. The operator's UI calls this and
+// then polls ConfirmPairing until the human has done step 4.
+//
+// Role + form factor are baked in:
+//   - DRIVER: can operate the car (lock/unlock/climate/charge/closures)
+//     but cannot enrol or remove other keys. Safer default than OWNER
+//     for a third-party device.
+//   - CLOUD_KEY: Tesla's form-factor enum for "cloud-style key holder"
+//     — what the official tesla-control documents for third-party
+//     servers and what tesla-control's examples use.
+func (s *TeslaService) RequestPairing(ctx context.Context) error {
+	vin, err := s.requireVIN()
+	if err != nil {
+		return err
+	}
+	pubKey, err := s.publicKeyECDH()
+	if err != nil {
+		return fmt.Errorf("public key extraction: %w", err)
+	}
+
+	// add-key-request is `requiresAuth: false` in the SDK — no
+	// StartSession needed. We use sendUnauthenticated() instead of
+	// withVCSEC() so we don't try to negotiate a signed session against
+	// a key the car has never seen.
+	return s.sendUnauthenticated(ctx, vin, func(car *vehicle.Vehicle) error {
+		return car.SendAddKeyRequestWithRole(
+			ctx,
+			pubKey,
+			keysproto.Role_ROLE_DRIVER,
+			vcsec.KeyFormFactor_KEY_FORM_FACTOR_CLOUD_KEY,
+		)
+	})
+}
+
+// ConfirmPairing polls for the post-enrollment state — i.e. it tries a
+// signed VCSEC session against the configured VIN. If that succeeds,
+// the car has accepted our key and we record the success in
+// tesla_pairing. The UI calls this in a loop after RequestPairing
+// returns, while the operator is walking out to the centre console.
 func (s *TeslaService) ConfirmPairing(ctx context.Context) error {
 	vin, err := s.requireVIN()
 	if err != nil {
@@ -265,7 +324,7 @@ func (s *TeslaService) ConfirmPairing(ctx context.Context) error {
 		_, err := car.BodyControllerState(ctx)
 		return err
 	}); err != nil {
-		return fmt.Errorf("VCSEC session against %s: %w (is the key enrolled in the Tesla app?)", vin, err)
+		return fmt.Errorf("VCSEC session against %s: %w (key not enrolled yet — tap the NFC card on the centre console)", vin, err)
 	}
 	if _, err := s.db.Exec(
 		`INSERT INTO tesla_pairing (vin, paired_at) VALUES (?, CURRENT_TIMESTAMP)
@@ -275,6 +334,64 @@ func (s *TeslaService) ConfirmPairing(ctx context.Context) error {
 		return fmt.Errorf("record pairing: %w", err)
 	}
 	return nil
+}
+
+// publicKeyECDH returns the operator's key as an *ecdh.PublicKey, the
+// type the SDK's SendAddKeyRequest expects. The SDK stores keys as
+// authentication.ECDHPrivateKey (interface); we extract the SEC1
+// public bytes and re-marshal.
+func (s *TeslaService) publicKeyECDH() (*ecdh.PublicKey, error) {
+	priv, err := s.loadOrGenerateKey()
+	if err != nil {
+		return nil, err
+	}
+	pubBytes := priv.PublicBytes()
+	if len(pubBytes) == 0 {
+		return nil, fmt.Errorf("private key produced empty public bytes")
+	}
+	return ecdh.P256().NewPublicKey(pubBytes)
+}
+
+// sendUnauthenticated is withVCSEC's sibling for operations that must
+// NOT start a signed session — only add-key-request today. It opens a
+// fresh BLE connection, calls car.Connect (just the transport
+// handshake), and invokes fn. Whatever fn does, it must not call
+// StartSession — that would fail because the car doesn't know our
+// key yet.
+func (s *TeslaService) sendUnauthenticated(parent context.Context, vin string, fn func(*vehicle.Vehicle) error) error {
+	if err := initAdapter(s.adapter); err != nil {
+		return fmt.Errorf("BLE adapter init: %w", err)
+	}
+
+	s.bleMu.Lock()
+	defer s.bleMu.Unlock()
+
+	priv, err := s.loadOrGenerateKey()
+	if err != nil {
+		return fmt.Errorf("load key: %w", err)
+	}
+
+	scanCtx, scanCancel := context.WithTimeout(parent, teslaScanTimeout)
+	defer scanCancel()
+	beacon, err := ble.ScanVehicleBeacon(scanCtx, vin)
+	if err != nil {
+		return fmt.Errorf("scan %s: %w", vin, err)
+	}
+
+	conn, err := ble.NewConnectionFromScanResult(scanCtx, vin, beacon)
+	if err != nil {
+		return fmt.Errorf("BLE connect %s: %w", vin, err)
+	}
+	defer conn.Close()
+
+	car, err := vehicle.NewVehicle(conn, priv, nil)
+	if err != nil {
+		return fmt.Errorf("vehicle init: %w", err)
+	}
+	if err := car.Connect(parent); err != nil {
+		return fmt.Errorf("car connect: %w", err)
+	}
+	return fn(car)
 }
 
 // ── State reads ─────────────────────────────────────────────────────

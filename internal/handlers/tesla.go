@@ -95,10 +95,29 @@ func (h *TeslaHandler) SetVIN(w http.ResponseWriter, r *http.Request) {
 	JSON(w, http.StatusOK, map[string]string{"vin": body.VIN})
 }
 
-// ConfirmPairing tries a VCSEC session against the configured VIN.
-// On success, marks the pairing as confirmed in the DB. The operator
-// clicks "I've enrolled the key" after pasting our public key into
-// the Tesla app — this is the round-trip that proves it.
+// RequestPairing sends the add-key-request to the car. The car then
+// prompts the operator on the centre-console screen to tap a physical
+// NFC key card; that's the human gesture that authorises the new key.
+// The handler returns as soon as the request is on the wire — the UI
+// then polls ConfirmPairing to detect when the car has accepted.
+func (h *TeslaHandler) RequestPairing(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := teslaCtx(r, 45*time.Second)
+	defer cancel()
+	if err := h.tesla.RequestPairing(ctx); err != nil {
+		JSONError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	user := GetUser(r)
+	if user != nil {
+		h.audit.Log("tesla.pair_request", user.Username+" sent add-key-request to the car")
+	}
+	JSON(w, http.StatusOK, map[string]bool{"requested": true})
+}
+
+// ConfirmPairing tries a signed VCSEC session — succeeds only after the
+// operator has tapped the NFC card on the centre console. The UI calls
+// this in a polling loop after RequestPairing returns. Returns 4xx
+// while the key is still pending approval; 200 once enrolled.
 func (h *TeslaHandler) ConfirmPairing(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := teslaCtx(r, 45*time.Second)
 	defer cancel()

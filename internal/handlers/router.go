@@ -150,7 +150,8 @@ func NewRouterWithFS(db *sql.DB, svc *services.Services, cfg config.Config, webF
 
 			r.Route("/tesla", func(r chi.Router) {
 				r.Get("/pair", teslaH.PairingInfo)
-				r.Post("/pair", teslaH.ConfirmPairing)
+				r.Post("/pair/request", teslaH.RequestPairing)
+				r.Post("/pair/confirm", teslaH.ConfirmPairing)
 				r.Put("/vin", teslaH.SetVIN)
 				r.Get("/state", teslaH.State)
 				r.Get("/log", teslaH.CommandLog)

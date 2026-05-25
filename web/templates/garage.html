@@ -30,7 +30,7 @@
             <div class="card-head">
                 <div>
                     <div class="card-head-title">Pair this Pi with your Tesla</div>
-                    <div class="card-head-sub">One-time setup · ~90 seconds</div>
+                    <div class="card-head-sub">One-time setup · ~60 seconds · physical NFC key card required</div>
                 </div>
             </div>
             <div class="card-body">
@@ -45,24 +45,41 @@
                         </div>
                     </li>
                     <li>
-                        <strong>Enrol the public key in your Tesla app.</strong>
-                        Open the mobile app → <em>Security &amp; Drivers</em> → <em>Locks</em> → <em>Add Key</em>,
-                        and paste the PEM below.
-                        <pre class="pem-block" x-text="publicKeyPEM || '(load failed — refresh the page)'"></pre>
-                        <button class="btn ghost" @click="copyPEM()">Copy</button>
+                        <strong>Be near the car</strong> — the Pi pairs over Bluetooth, not Wi-Fi.
+                        Glovebox / centre-console range is the design target.
+                        Have your <strong>physical NFC key card</strong> ready (the credit-card-sized one Tesla shipped with the car).
                     </li>
                     <li>
-                        <strong>Approve the new key in the car.</strong>
-                        The car will prompt you to tap your physical NFC key card on the centre console.
+                        <strong>Start the pairing request.</strong>
+                        The Pi will send an "add this key" request to the car over BLE.
+                        The Tesla's centre-console screen will prompt:
+                        <em>"netfilterd would like to be added as a Driver key — tap your key card to approve."</em>
+                        <div class="form-row" style="margin-top:8px;">
+                            <button class="btn" @click="startPairing()" :disabled="busy || !vin">
+                                <span x-text="pairState === 'awaiting' ? 'Waiting for NFC tap…' : (busy ? 'Sending request…' : 'Send pairing request')"></span>
+                            </button>
+                            <span x-show="pairState === 'awaiting'" class="mono" style="color:var(--muted);">
+                                attempt <span x-text="pollAttempt"></span> · go tap the card now
+                            </span>
+                        </div>
                     </li>
                     <li>
-                        <strong>Confirm the handshake.</strong>
-                        <button class="btn" @click="confirmPair()" :disabled="busy || !vin">
-                            <span x-text="busy ? 'Pinging the car…' : 'I\'ve enrolled the key'"></span>
-                        </button>
-                        <div x-show="pairError" class="form-error" x-text="pairError"></div>
+                        <strong>Tap your NFC key card on the centre console.</strong>
+                        Then confirm on the touchscreen. The Pi is polling — you'll see the page switch to
+                        the dashboard within a few seconds of the tap.
                     </li>
                 </ol>
+                <div x-show="pairError" class="form-error" x-text="pairError"></div>
+
+                <details style="margin-top:24px;">
+                    <summary style="cursor:pointer; color:var(--muted); font-size:13px;">Public key (diagnostic only)</summary>
+                    <p style="font-size:12px; color:var(--muted); margin:8px 0;">
+                        You don't need to paste this anywhere — the Pi sends it directly to the car via BLE.
+                        Shown here so you can verify the same key fingerprint shows up in the Tesla app's
+                        <em>Locks</em> list after pairing.
+                    </p>
+                    <pre class="pem-block" x-text="publicKeyPEM || '(load failed — refresh the page)'"></pre>
+                </details>
             </div>
         </div>
     </template>
@@ -234,7 +251,9 @@
         </div>
     </template>
 </div>
+{{end}}
 
+{{define "scripts"}}
 <script>
 function garageApp() {
     return {
@@ -244,6 +263,10 @@ function garageApp() {
         vinInput: '',
         publicKeyPEM: '',
         pairError: '',
+        // pairState walks: '' → 'requesting' → 'awaiting' → 'paired' / error
+        pairState: '',
+        pollAttempt: 0,
+        _pairPollTimer: null,
 
         // live snapshot
         vcsec: {},
@@ -293,20 +316,64 @@ function garageApp() {
             try { await navigator.clipboard.writeText(this.publicKeyPEM); notify('PEM copied', 'success'); }
             catch (e) { notify('clipboard blocked — select manually', 'warn'); }
         },
-        async confirmPair() {
+
+        // startPairing kicks off the two-step flow. Step one sends
+        // add-key-request to the car over BLE — that triggers the
+        // centre-console prompt. Step two polls a signed VCSEC session;
+        // success means the user has tapped their NFC card and the key
+        // is enrolled.
+        async startPairing() {
             this.pairError = '';
+            this.pollAttempt = 0;
+            this.pairState = 'requesting';
             this.busy = true;
             try {
-                await api.post('/api/tesla/pair', {});
-                this.paired = true;
-                notify('Paired ✓', 'success');
-                await this.refresh('bcs');
-                await this.loadLog();
+                await api.post('/api/tesla/pair/request', {});
+                this.pairState = 'awaiting';
+                notify('Look at the centre console — tap your NFC card', 'info');
+                this._startPairingPoll();
             } catch (e) {
-                this.pairError = e.message || 'pairing handshake failed — is the key enrolled?';
+                this.pairState = '';
+                this.pairError = (e.message || 'add-key-request failed') +
+                    ' — check that the car is awake and in BLE range of the Pi (glovebox).';
             } finally {
                 this.busy = false;
             }
+        },
+        _startPairingPoll() {
+            // Poll every 3s for up to ~3 minutes. Each call is one signed
+            // VCSEC session attempt; succeeds only after the NFC tap +
+            // touchscreen confirm. We stop polling after 60 tries to
+            // avoid leaving zombie traffic if the operator walks away.
+            if (this._pairPollTimer) clearInterval(this._pairPollTimer);
+            const maxTries = 60;
+            this._pairPollTimer = setInterval(async () => {
+                this.pollAttempt++;
+                try {
+                    await api.post('/api/tesla/pair/confirm', {});
+                    // success
+                    this._stopPairingPoll();
+                    this.paired = true;
+                    this.pairState = 'paired';
+                    notify('Paired ✓', 'success');
+                    // Spin up the live dashboard immediately.
+                    await this.refresh('bcs');
+                    await this.loadLog();
+                    this._statePoll = setInterval(() => this.refresh(''), 15000);
+                    this._logPoll = setInterval(() => this.loadLog(), 60000);
+                } catch (e) {
+                    // expected while the user hasn't tapped yet
+                    if (this.pollAttempt >= maxTries) {
+                        this._stopPairingPoll();
+                        this.pairState = '';
+                        this.pairError = 'gave up after ' + maxTries + ' attempts — start over when you\'re ready';
+                    }
+                }
+            }, 3000);
+        },
+        _stopPairingPoll() {
+            if (this._pairPollTimer) clearInterval(this._pairPollTimer);
+            this._pairPollTimer = null;
         },
 
         // ── state refresh ──────────────────────────────────────
