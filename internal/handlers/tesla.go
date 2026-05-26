@@ -420,6 +420,8 @@ func serializeSnapshot(s services.VehicleSnapshot) map[string]any {
 			"driver_temp_set_c":        s.DriverTempSetC,
 			"is_climate_on":            s.IsClimateOn,
 			"is_preconditioning":       s.IsPreconditioning,
+			"defrost_on":               s.DefrostOn,
+			"defrost_max":              s.DefrostMax,
 			"fan_status":               s.FanStatus,
 			"seat_heater_left":         s.SeatHeaterLeft,
 			"seat_heater_right":        s.SeatHeaterRight,

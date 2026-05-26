@@ -213,12 +213,12 @@
                                 Turn off
                             </button>
                             <button class="btn"
-                                    :class="climate.is_preconditioning ? '' : 'ghost'"
+                                    :class="climate.defrost_on ? '' : 'ghost'"
                                     @click="optimisticToggle(
-                                        climate.is_preconditioning ? 'defrost-off' : 'defrost-on',
-                                        () => climate.is_preconditioning = !climate.is_preconditioning,
-                                        () => climate.is_preconditioning = !climate.is_preconditioning)">
-                                <span x-text="climate.is_preconditioning ? 'Defrost ON' : 'Defrost'"></span>
+                                        climate.defrost_on ? 'defrost-off' : 'defrost-on',
+                                        () => climate.defrost_on = !climate.defrost_on,
+                                        () => climate.defrost_on = !climate.defrost_on)">
+                                <span x-text="climate.defrost_on ? 'Defrost ON' : 'Defrost'"></span>
                             </button>
                             <button class="btn"
                                     :class="climate.cabin_overheat_protection ? '' : 'ghost'"

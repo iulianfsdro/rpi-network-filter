@@ -138,7 +138,9 @@ type VehicleSnapshot struct {
 	OutsideTempC     float32
 	DriverTempSetC   float32
 	IsClimateOn      bool
-	IsPreconditioning bool // defrost / "Get out of car cleanly" mode
+	IsPreconditioning bool // Tesla's smart pre-departure preconditioning (separate from defrost)
+	DefrostOn         bool // true if DefrostMode is Normal or Max (what the /garage Defrost button reflects)
+	DefrostMax        bool // true only if DefrostMode is Max — for finer UI later
 	FanStatus        int32
 	SeatHeaterLeft   int32
 	SeatHeaterRight  int32
@@ -1431,6 +1433,24 @@ func (s *TeslaService) updateClimate(cl *carserver.ClimateState) {
 	s.snap.DriverTempSetC = cl.GetDriverTempSetting()
 	s.snap.IsClimateOn = cl.GetIsClimateOn()
 	s.snap.IsPreconditioning = cl.GetIsPreconditioning()
+	// Defrost mode is a separate oneof from is_preconditioning. The
+	// /garage "Defrost" button drives SetPreconditioningMax which the
+	// car reflects as DefrostMode_Max (or sometimes Normal). The
+	// is_preconditioning bool is Tesla's "pre-departure smart climate"
+	// flag, not what the operator clicked — confused them earlier.
+	if dm := cl.GetDefrostMode(); dm != nil {
+		switch dm.GetType().(type) {
+		case *carserver.ClimateState_DefrostMode_Max:
+			s.snap.DefrostOn = true
+			s.snap.DefrostMax = true
+		case *carserver.ClimateState_DefrostMode_Normal:
+			s.snap.DefrostOn = true
+			s.snap.DefrostMax = false
+		default:
+			s.snap.DefrostOn = false
+			s.snap.DefrostMax = false
+		}
+	}
 	s.snap.FanStatus = cl.GetFanStatus()
 	s.snap.SeatHeaterLeft = cl.GetSeatHeaterLeft()
 	s.snap.SeatHeaterRight = cl.GetSeatHeaterRight()
