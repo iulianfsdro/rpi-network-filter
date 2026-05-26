@@ -917,6 +917,15 @@ func (s *TeslaService) Stop() {
 	s.pollerCancel = nil
 }
 
+// teslaInfotainmentMaxAge caps how old the cached Charge/Climate/etc
+// data is allowed to get before the poller refreshes it — but ONLY
+// when the car is already awake (so we don't pay the wake-12V cost
+// for cosmetic freshness). When the car is asleep, the cached data
+// ages indefinitely and the /garage UI honestly displays "N minutes
+// ago." The operator can force-refresh from the Refresh button if
+// they actually need fresh data right now.
+const teslaInfotainmentMaxAge = 2 * time.Minute
+
 func (s *TeslaService) runPoller(ctx context.Context) {
 	defer close(s.pollerDone)
 	tick := time.NewTicker(teslaPollInterval)
@@ -925,13 +934,33 @@ func (s *TeslaService) runPoller(ctx context.Context) {
 		if s.IsPaired() {
 			pollCtx, cancel := context.WithTimeout(ctx, teslaCommandTimeout+teslaScanTimeout)
 			if err := s.PollBodyControllerState(pollCtx); err != nil {
-				// Don't spam the journal — BLE out-of-range is the
-				// common case when the Pi isn't in/near the car.
 				if !errors.Is(err, context.DeadlineExceeded) {
 					log.Printf("[TESLA] poll BCS: %v", err)
 				}
 			}
 			cancel()
+
+			// Opportunistic Infotainment refresh: piggyback on the
+			// fact that the car just answered BCS. If it's awake AND
+			// our cached Charge/Climate is stale, refresh those too —
+			// the car is up already, no wake cost. If asleep, skip.
+			s.stateMu.RLock()
+			awake := s.snap.SleepStatus == "awake"
+			cacheOld := s.lastChargeAt.IsZero() ||
+				time.Since(s.lastChargeAt) > teslaInfotainmentMaxAge
+			s.stateMu.RUnlock()
+			if awake && cacheOld {
+				icCtx, icCancel := context.WithTimeout(ctx, teslaCommandTimeout+teslaScanTimeout)
+				// wake=false — we believe the car is already awake;
+				// if BCS lied, the call no-ops and the cache just
+				// stays stale until the next opportunity.
+				if err := s.PollChargeAndClimate(icCtx, false); err != nil {
+					if !errors.Is(err, context.DeadlineExceeded) {
+						log.Printf("[TESLA] opportunistic Infotainment refresh: %v", err)
+					}
+				}
+				icCancel()
+			}
 		}
 		select {
 		case <-ctx.Done():

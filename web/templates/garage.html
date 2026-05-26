@@ -495,20 +495,28 @@ function garageApp() {
         // recent activity
         log: [],
 
-        // command-busy flag — disables every action button during a BLE round-trip
+        // busy = manual Refresh in flight. Optimistic toggles do NOT
+        // set this; only the top-right Refresh button does.
         busy: false,
+
+        // optimisticLockUntil: Date.now() < this ⇒ a recent toggle is
+        // in flight, and the background poll must NOT overwrite local
+        // state from the cached server snapshot (which still has the
+        // pre-toggle value until the post-command refresh writes it).
+        // The fix for the "click → flip on → notification → flip off
+        // → 15s later flip on" rubber-band the operator saw.
+        optimisticLockUntil: 0,
 
         // ── lifecycle ──────────────────────────────────────────
         async init() {
             await this.loadPairing();
             if (this.paired) {
-                // Initial pull is FULL — battery, range, climate, windows,
-                // tyres, location all live in the Infotainment domain.
-                // Doing just BCS here meant the operator landed on a page
-                // full of "never polled" cards and had to click Refresh
-                // before anything useful showed. Costs one wake-infotainment
-                // cycle per page open; that's the right trade for the UX.
-                await this.refresh('full');
+                // Init is a CACHE READ. The daemon's background poller
+                // keeps the snapshot warm whenever the car is awake;
+                // we just display whatever it has + the staleness
+                // labels. No wake cost per page open. The operator
+                // forces a fresh poll via the top-right Refresh button.
+                await this.refresh('');
                 await this.loadLog();
                 // Background polling — every 15s for cached state, every 60s for log
                 this._statePoll = setInterval(() => this.refresh(''), 15000);
@@ -578,9 +586,10 @@ function garageApp() {
                     this.paired = true;
                     this.pairState = 'paired';
                     notify('Paired ✓', 'success');
-                    // First post-pair pull is FULL so the dashboard
-                    // lands populated (battery / range / climate /
-                    // windows / tyres / location all from Infotainment).
+                    // First post-pair pull IS full — there's nothing in
+                    // the daemon cache yet and the car is awake anyway
+                    // (we just talked to it for pairing). Subsequent
+                    // page loads use the cached snapshot.
                     await this.refresh('full');
                     await this.loadLog();
                     this._statePoll = setInterval(() => this.refresh(''), 15000);
@@ -602,12 +611,19 @@ function garageApp() {
 
         // ── state refresh ──────────────────────────────────────
         //
-        // busy=true only when the operator triggered the refresh
-        // manually (clicked the top-right Refresh button, which passes
-        // 'full' / 'bcs'). Background polls (mode='') stay invisible
-        // — no UI lockup while we silently re-poll after a command.
+        // mode === 'full' or 'bcs' ⇒ manual / post-command: forces the
+        //   server to hit the car and refresh its cache, busy=true so
+        //   the Refresh button shows working state.
+        // mode === '' ⇒ background poll: just reads the daemon's
+        //   cached snapshot, no BLE traffic, no UI lockup. Skipped
+        //   entirely while an optimistic toggle is in flight to avoid
+        //   the rubber-band effect (cached snapshot has stale pre-
+        //   toggle value).
         async refresh(mode) {
             const manual = mode === 'full' || mode === 'bcs';
+            if (!manual && Date.now() < this.optimisticLockUntil) {
+                return; // background poll suppressed during optimistic window
+            }
             if (manual) this.busy = true;
             try {
                 const q = mode ? '?refresh=' + mode : '';
@@ -665,21 +681,20 @@ function garageApp() {
         },
 
         // optimisticToggle flips a local state field immediately, fires
-        // the command in the background, and reverts on failure. The
-        // caller passes:
-        //   - commandName: the path segment for /api/tesla/commands/<name>
-        //   - apply():    a closure that performs the optimistic update
-        //                 on the local snapshot
-        //   - revert():   a closure that undoes apply() on error
-        //   - refreshKind ('full' by default): which refresh to schedule
-        //                 1.5s after the command, so the eventual real
-        //                 state replaces the optimistic value.
+        // the command in the background, and reverts on failure.
         //
-        // No busy=true here — controls stay live. The bleMu in the
-        // service serialises overlapping commands; the UI doesn't
-        // need to mirror that lock.
+        // optimisticLockUntil is set to now+10s as soon as we apply.
+        // Background polls (every 15s, reading the daemon's cached
+        // snapshot) check this and skip updating local state during the
+        // window — otherwise the cached snapshot (which still has the
+        // pre-toggle value) would overwrite the optimistic flip and
+        // the user would see the button rubber-band back, then back
+        // again once the post-command full refresh lands. The window
+        // covers ~1.5s (full refresh setTimeout) + a couple seconds
+        // for the actual BLE round-trip + slack.
         async optimisticToggle(commandName, apply, revert, refreshKind) {
             apply();
+            this.optimisticLockUntil = Date.now() + 10000;
             try {
                 await api.post('/api/tesla/commands/' + commandName, {});
                 notify(commandName.replace(/-/g, ' ') + ' ✓', 'success');
@@ -688,6 +703,7 @@ function garageApp() {
             } catch (e) {
                 revert();
                 notify(e.message || (commandName + ' failed'), 'danger');
+                this.optimisticLockUntil = 0; // clear immediately on error
             }
         },
 
