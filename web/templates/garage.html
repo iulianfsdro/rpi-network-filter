@@ -502,9 +502,15 @@ function garageApp() {
         async init() {
             await this.loadPairing();
             if (this.paired) {
-                await this.refresh('bcs');
+                // Initial pull is FULL — battery, range, climate, windows,
+                // tyres, location all live in the Infotainment domain.
+                // Doing just BCS here meant the operator landed on a page
+                // full of "never polled" cards and had to click Refresh
+                // before anything useful showed. Costs one wake-infotainment
+                // cycle per page open; that's the right trade for the UX.
+                await this.refresh('full');
                 await this.loadLog();
-                // background polling — every 15s for cached state, every 60s for log
+                // Background polling — every 15s for cached state, every 60s for log
                 this._statePoll = setInterval(() => this.refresh(''), 15000);
                 this._logPoll = setInterval(() => this.loadLog(), 60000);
             }
@@ -572,8 +578,10 @@ function garageApp() {
                     this.paired = true;
                     this.pairState = 'paired';
                     notify('Paired ✓', 'success');
-                    // Spin up the live dashboard immediately.
-                    await this.refresh('bcs');
+                    // First post-pair pull is FULL so the dashboard
+                    // lands populated (battery / range / climate /
+                    // windows / tyres / location all from Infotainment).
+                    await this.refresh('full');
                     await this.loadLog();
                     this._statePoll = setInterval(() => this.refresh(''), 15000);
                     this._logPoll = setInterval(() => this.loadLog(), 60000);
