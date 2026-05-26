@@ -372,8 +372,18 @@ func serializeSnapshot(s services.VehicleSnapshot) map[string]any {
 				"window_passenger_front": s.Closures.WindowPassengerFront,
 				"window_driver_rear":     s.Closures.WindowDriverRear,
 				"window_passenger_rear":  s.Closures.WindowPassengerRear,
-				"sentry_available":       s.Closures.SentryAvailable,
-				"sentry_on":              s.Closures.SentryOn,
+				// Infotainment-sourced door/trunk/lock bools — used by the
+				// UI as the canonical view when present, since VCSEC's
+				// equivalents lag physical reality.
+				"inf_door_driver_front":    s.Closures.InfDoorOpenDriverFront,
+				"inf_door_passenger_front": s.Closures.InfDoorOpenPassengerFront,
+				"inf_door_driver_rear":     s.Closures.InfDoorOpenDriverRear,
+				"inf_door_passenger_rear":  s.Closures.InfDoorOpenPassengerRear,
+				"inf_frunk_open":           s.Closures.InfTrunkFrontOpen,
+				"inf_trunk_open":           s.Closures.InfTrunkRearOpen,
+				"inf_locked":               s.Closures.InfLocked,
+				"sentry_available":         s.Closures.SentryAvailable,
+				"sentry_on":                s.Closures.SentryOn,
 			},
 			"freshness_ms": freshness(s.BCSFreshness),
 		},

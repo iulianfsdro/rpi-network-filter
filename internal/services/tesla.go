@@ -179,6 +179,21 @@ type ClosuresSnapshot struct {
 	WindowDriverRear     bool
 	WindowPassengerRear  bool
 
+	// CarServer ClosuresState ALSO reports door + trunk + frunk + lock
+	// as plain bools. Tesla's VCSEC closure sensor for these lags
+	// physical reality by hours sometimes — we've reproduced "frunk
+	// still showing open at 18:00 after closing it at 09:00" because
+	// VCSEC never updated its own snapshot. The Infotainment view in
+	// ClosuresState is sourced closer to the actual latches and
+	// refreshes within seconds. Prefer it when fresh.
+	InfDoorOpenDriverFront    bool
+	InfDoorOpenPassengerFront bool
+	InfDoorOpenDriverRear     bool
+	InfDoorOpenPassengerRear  bool
+	InfTrunkFrontOpen         bool // frunk
+	InfTrunkRearOpen          bool // trunk
+	InfLocked                 bool
+
 	// Sentry mode lives on CarServer ClosuresState too.
 	SentryAvailable bool
 	SentryOn        bool
@@ -1284,6 +1299,13 @@ func (s *TeslaService) updateClosures(cs *carserver.ClosuresState) {
 	s.snap.Closures.WindowPassengerFront = cs.GetWindowOpenPassengerFront()
 	s.snap.Closures.WindowDriverRear = cs.GetWindowOpenDriverRear()
 	s.snap.Closures.WindowPassengerRear = cs.GetWindowOpenPassengerRear()
+	s.snap.Closures.InfDoorOpenDriverFront = cs.GetDoorOpenDriverFront()
+	s.snap.Closures.InfDoorOpenPassengerFront = cs.GetDoorOpenPassengerFront()
+	s.snap.Closures.InfDoorOpenDriverRear = cs.GetDoorOpenDriverRear()
+	s.snap.Closures.InfDoorOpenPassengerRear = cs.GetDoorOpenPassengerRear()
+	s.snap.Closures.InfTrunkFrontOpen = cs.GetDoorOpenTrunkFront()
+	s.snap.Closures.InfTrunkRearOpen = cs.GetDoorOpenTrunkRear()
+	s.snap.Closures.InfLocked = cs.GetLocked()
 	s.snap.Closures.SentryAvailable = cs.GetSentryModeAvailable()
 	if sm := cs.GetSentryModeState(); sm != nil {
 		// SentryModeState is a oneof; GetType() returns the variant.

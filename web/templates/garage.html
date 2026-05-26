@@ -855,25 +855,39 @@ function garageApp() {
         },
         get closureCards() {
             const c = (this.vcsec || {}).closures || {};
-            // VCSEC closures (door + trunk + frunk + charge port + tonneau)
-            const doorItems = [
-                ['front_driver_door',    'Driver door'],
-                ['front_passenger_door', 'Passenger door'],
-                ['rear_driver_door',     'Driver rear'],
-                ['rear_passenger_door',  'Passenger rear'],
-                ['front_trunk',          'Frunk'],
-                ['rear_trunk',           'Trunk'],
-                ['charge_port',          'Charge port'],
+            // Each entry: [vcsecKey, infotainmentBoolKey, label].
+            // infotainmentBoolKey is the canonical source when fresh —
+            // VCSEC's closure sensor for doors/trunks/frunk persistently
+            // lags physical state, sometimes by hours. We fall back to
+            // VCSEC's string only when Infotainment hasn't been polled
+            // yet (cold start before first full refresh).
+            const items = [
+                ['front_driver_door',    'inf_door_driver_front',    'Driver door'],
+                ['front_passenger_door', 'inf_door_passenger_front', 'Passenger door'],
+                ['rear_driver_door',     'inf_door_driver_rear',     'Driver rear'],
+                ['rear_passenger_door',  'inf_door_passenger_rear',  'Passenger rear'],
+                ['front_trunk',          'inf_frunk_open',           'Frunk'],
+                ['rear_trunk',           'inf_trunk_open',           'Trunk'],
+                ['charge_port',          null,                       'Charge port'], // charge port has its own override path below
             ];
-            const cards = doorItems.map(([key, label]) => {
-                let state = c[key] || 'unknown';
+            const haveInf = this.chargeFreshnessMs != null;
+            const cards = items.map(([vKey, iKey, label]) => {
+                let state = c[vKey] || 'unknown';
                 let open  = state !== 'closed' && state !== 'unknown';
-                if (key === 'charge_port' && this.chargeFreshnessMs != null
+                // Prefer the Infotainment-sourced bool when we have one
+                // and a full poll has run.
+                if (iKey && haveInf && typeof c[iKey] === 'boolean') {
+                    open  = c[iKey];
+                    state = open ? 'open' : 'closed';
+                }
+                // Charge port pre-existing special case still applies —
+                // ChargeState.charge_port_door_open is even closer to truth.
+                if (vKey === 'charge_port' && haveInf
                         && this.charge && typeof this.charge.charge_port_open === 'boolean') {
                     open  = this.charge.charge_port_open;
                     state = open ? 'open' : 'closed';
                 }
-                return { key, label, state, open };
+                return { key: vKey, label, state, open };
             });
             // Windows from Infotainment closures — booleans
             const windowItems = [
