@@ -542,14 +542,22 @@ func (s *TeslaService) CloseTrunk(ctx context.Context, userID int64) error {
 	})
 }
 
+// OpenChargePort / CloseChargePort are CarServer (Infotainment-domain)
+// actions, NOT VCSEC closures — unlike trunk/frunk which go through the
+// security subsystem. Routing them through runVCSECCommand sent the
+// signed message to a domain without a session and the car rejected
+// with "cannot send authenticated command before establishing a vehicle
+// session". Infotainment also means we wake the centre-console
+// computer if asleep; that's fine — charge-port actions are an
+// operator gesture, not background polling.
 func (s *TeslaService) OpenChargePort(ctx context.Context, userID int64) error {
-	return s.runVCSECCommand(ctx, userID, "open_charge_port", func(car *vehicle.Vehicle) error {
+	return s.runInfotainmentCommand(ctx, userID, "open_charge_port", true, func(car *vehicle.Vehicle) error {
 		return car.OpenChargePort(ctx)
 	})
 }
 
 func (s *TeslaService) CloseChargePort(ctx context.Context, userID int64) error {
-	return s.runVCSECCommand(ctx, userID, "close_charge_port", func(car *vehicle.Vehicle) error {
+	return s.runInfotainmentCommand(ctx, userID, "close_charge_port", true, func(car *vehicle.Vehicle) error {
 		return car.CloseChargePort(ctx)
 	})
 }
