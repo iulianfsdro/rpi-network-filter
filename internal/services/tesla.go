@@ -254,16 +254,132 @@ type TeslaService struct {
 	pollerCtx    context.Context
 	pollerCancel context.CancelFunc
 	pollerDone   chan struct{}
+
+	// closureAssertions: operator-set closure states that take
+	// priority over polled VCSEC/Infotainment data until a TTL
+	// expires OR a poll arrives whose reading agrees with the
+	// assertion. The point is to survive Tesla's VCSEC closure
+	// sensor lag (sometimes hours after a clean physical close)
+	// without the snapshot lying about state — the operator just
+	// closed the frunk, the daemon writes "closed" here, every
+	// subsequent /api/tesla/state read returns "closed" no matter
+	// what the lagging sensor says, until 5 min later it gives up
+	// (or the sensor finally agrees).
+	closureAssertMu sync.Mutex
+	closureAssertions map[string]closureAssertion
 }
+
+// closureAssertion is the per-closure operator override.
+type closureAssertion struct {
+	expectedClosed bool      // true = "operator says this is closed"
+	until          time.Time // assertion drops at this point
+}
+
+// teslaClosureAssertTTL is how long an assertion holds against
+// contradicting poll data. Long enough to cover Tesla's worst
+// observed VCSEC closure-sensor lag in the wild; short enough that
+// if the operator genuinely opened the frunk physically and the
+// daemon missed it, the truth surfaces within a few minutes.
+const teslaClosureAssertTTL = 5 * time.Minute
 
 // NewTeslaService wires the service. Doesn't start the poller — call
 // Start() from the composition root after migrations are done.
 func NewTeslaService(db *sql.DB, audit *AuditService) *TeslaService {
 	return &TeslaService{
-		db:      db,
-		audit:   audit,
-		keyPath: teslaKeyPath,
-		adapter: teslaBLEAdapter,
+		db:                db,
+		audit:             audit,
+		keyPath:           teslaKeyPath,
+		adapter:           teslaBLEAdapter,
+		closureAssertions: make(map[string]closureAssertion),
+	}
+}
+
+// assertClosure marks a closure as operator-set. Subsequent Snapshot()
+// reads return this state for that closure regardless of what the
+// polled sensor data says, until either:
+//   (a) teslaClosureAssertTTL passes since the assertion, or
+//   (b) a poll arrives whose value agrees with the assertion
+//       (we let it stick around for cleanup; next applyAssertions
+//       call drops it).
+//
+// name is the snapshot field key — "front_trunk" / "rear_trunk" /
+// "charge_port" / "window_*". expectedClosed: true if the operator's
+// intent is "this should now be closed".
+func (s *TeslaService) assertClosure(name string, expectedClosed bool) {
+	s.closureAssertMu.Lock()
+	defer s.closureAssertMu.Unlock()
+	s.closureAssertions[name] = closureAssertion{
+		expectedClosed: expectedClosed,
+		until:          time.Now().Add(teslaClosureAssertTTL),
+	}
+}
+
+// applyClosureAssertions mutates the passed snapshot copy, replacing
+// each closure field with the operator-asserted value where applicable.
+// Also drops expired assertions and assertions that now agree with the
+// snapshot (no longer needed). Caller must hold no locks; we take both
+// stateMu and closureAssertMu briefly.
+//
+// Closures handled (by the snapshot field name we set):
+//   - front_trunk  → ClosuresSnapshot.FrontTrunk + InfTrunkFrontOpen
+//   - rear_trunk   → RearTrunk + InfTrunkRearOpen
+//   - charge_port  → ChargePort
+//   - window_*     → Closures.Window*
+func (s *TeslaService) applyClosureAssertions(snap *VehicleSnapshot) {
+	s.closureAssertMu.Lock()
+	defer s.closureAssertMu.Unlock()
+	now := time.Now()
+	for name, a := range s.closureAssertions {
+		if now.After(a.until) {
+			delete(s.closureAssertions, name)
+			continue
+		}
+		// stateString picks the right ClosureState_E-equivalent label
+		// the UI knows how to render.
+		stateStr := "open"
+		if a.expectedClosed {
+			stateStr = "closed"
+		}
+		openBool := !a.expectedClosed
+		// Track whether the current poll value already agrees, so we
+		// can drop the assertion if so.
+		agreed := false
+
+		switch name {
+		case "front_trunk":
+			agreed = (snap.Closures.FrontTrunk == stateStr)
+			snap.Closures.FrontTrunk = stateStr
+			b := openBool
+			snap.Closures.InfTrunkFrontOpen = &b
+		case "rear_trunk":
+			agreed = (snap.Closures.RearTrunk == stateStr)
+			snap.Closures.RearTrunk = stateStr
+			b := openBool
+			snap.Closures.InfTrunkRearOpen = &b
+		case "charge_port":
+			// Three sources for charge port — VCSEC closure + Infotainment
+			// inf bool + ChargeState.charge_port_door_open. Override all
+			// three so whichever the UI prefers, it sees the assertion.
+			agreed = (snap.Closures.ChargePort == stateStr)
+			snap.Closures.ChargePort = stateStr
+			snap.ChargePortOpen = openBool
+		case "window_driver_front":
+			agreed = (snap.Closures.WindowDriverFront == openBool)
+			snap.Closures.WindowDriverFront = openBool
+		case "window_passenger_front":
+			agreed = (snap.Closures.WindowPassengerFront == openBool)
+			snap.Closures.WindowPassengerFront = openBool
+		case "window_driver_rear":
+			agreed = (snap.Closures.WindowDriverRear == openBool)
+			snap.Closures.WindowDriverRear = openBool
+		case "window_passenger_rear":
+			agreed = (snap.Closures.WindowPassengerRear == openBool)
+			snap.Closures.WindowPassengerRear = openBool
+		}
+
+		if agreed {
+			delete(s.closureAssertions, name)
+		}
 	}
 }
 
@@ -591,6 +707,7 @@ func (s *TeslaService) Snapshot() VehicleSnapshot {
 	if !s.lastLocationAt.IsZero() {
 		out.LocationFreshness = now.Sub(s.lastLocationAt)
 	}
+	s.applyClosureAssertions(&out)
 	return out
 }
 
@@ -632,22 +749,46 @@ func (s *TeslaService) FlashLights(ctx context.Context, userID int64) error {
 	})
 }
 
+// OpenFrunk is the toggle command for the frunk on cars with a powered
+// frunk (2024 Berlin Y, Cybertruck, Plaid) — Tesla's SDK has no
+// CloseFrunk equivalent because the same OpenFrunk message is treated
+// by the car as "actuate, whatever state I'm in." We read the
+// snapshot's current frunk state to know which direction the operator
+// is asking for, then assert the OPPOSITE post-success so the snapshot
+// reflects intent even while VCSEC's notoriously laggy frunk-closed
+// sensor catches up.
 func (s *TeslaService) OpenFrunk(ctx context.Context, userID int64) error {
-	return s.runVCSECCommand(ctx, userID, "open_frunk", func(car *vehicle.Vehicle) error {
+	s.stateMu.RLock()
+	currentlyClosed := s.snap.Closures.FrontTrunk == "closed"
+	s.stateMu.RUnlock()
+	err := s.runVCSECCommand(ctx, userID, "open_frunk", func(car *vehicle.Vehicle) error {
 		return car.OpenFrunk(ctx)
 	})
+	if err == nil {
+		// If it was closed, expect it to now be OPEN; if open, expect CLOSED.
+		s.assertClosure("front_trunk", !currentlyClosed)
+	}
+	return err
 }
 
 func (s *TeslaService) OpenTrunk(ctx context.Context, userID int64) error {
-	return s.runVCSECCommand(ctx, userID, "open_trunk", func(car *vehicle.Vehicle) error {
+	err := s.runVCSECCommand(ctx, userID, "open_trunk", func(car *vehicle.Vehicle) error {
 		return car.OpenTrunk(ctx)
 	})
+	if err == nil {
+		s.assertClosure("rear_trunk", false) // expect open
+	}
+	return err
 }
 
 func (s *TeslaService) CloseTrunk(ctx context.Context, userID int64) error {
-	return s.runVCSECCommand(ctx, userID, "close_trunk", func(car *vehicle.Vehicle) error {
+	err := s.runVCSECCommand(ctx, userID, "close_trunk", func(car *vehicle.Vehicle) error {
 		return car.CloseTrunk(ctx)
 	})
+	if err == nil {
+		s.assertClosure("rear_trunk", true) // expect closed
+	}
+	return err
 }
 
 // OpenChargePort / CloseChargePort are CarServer (Infotainment-domain)
@@ -659,15 +800,23 @@ func (s *TeslaService) CloseTrunk(ctx context.Context, userID int64) error {
 // computer if asleep; that's fine — charge-port actions are an
 // operator gesture, not background polling.
 func (s *TeslaService) OpenChargePort(ctx context.Context, userID int64) error {
-	return s.runInfotainmentCommand(ctx, userID, "open_charge_port", true, func(car *vehicle.Vehicle) error {
+	err := s.runInfotainmentCommand(ctx, userID, "open_charge_port", true, func(car *vehicle.Vehicle) error {
 		return car.OpenChargePort(ctx)
 	})
+	if err == nil {
+		s.assertClosure("charge_port", false) // expect open
+	}
+	return err
 }
 
 func (s *TeslaService) CloseChargePort(ctx context.Context, userID int64) error {
-	return s.runInfotainmentCommand(ctx, userID, "close_charge_port", true, func(car *vehicle.Vehicle) error {
+	err := s.runInfotainmentCommand(ctx, userID, "close_charge_port", true, func(car *vehicle.Vehicle) error {
 		return car.CloseChargePort(ctx)
 	})
+	if err == nil {
+		s.assertClosure("charge_port", true) // expect closed
+	}
+	return err
 }
 
 func (s *TeslaService) ClimateOn(ctx context.Context, userID int64) error {
@@ -707,15 +856,29 @@ func (s *TeslaService) StopCharging(ctx context.Context, userID int64) error {
 }
 
 func (s *TeslaService) VentWindows(ctx context.Context, userID int64) error {
-	return s.runInfotainmentCommand(ctx, userID, "vent_windows", true, func(car *vehicle.Vehicle) error {
+	err := s.runInfotainmentCommand(ctx, userID, "vent_windows", true, func(car *vehicle.Vehicle) error {
 		return car.VentWindows(ctx)
 	})
+	if err == nil {
+		s.assertClosure("window_driver_front", false)
+		s.assertClosure("window_passenger_front", false)
+		s.assertClosure("window_driver_rear", false)
+		s.assertClosure("window_passenger_rear", false)
+	}
+	return err
 }
 
 func (s *TeslaService) CloseWindows(ctx context.Context, userID int64) error {
-	return s.runInfotainmentCommand(ctx, userID, "close_windows", true, func(car *vehicle.Vehicle) error {
+	err := s.runInfotainmentCommand(ctx, userID, "close_windows", true, func(car *vehicle.Vehicle) error {
 		return car.CloseWindows(ctx)
 	})
+	if err == nil {
+		s.assertClosure("window_driver_front", true)
+		s.assertClosure("window_passenger_front", true)
+		s.assertClosure("window_driver_rear", true)
+		s.assertClosure("window_passenger_rear", true)
+	}
+	return err
 }
 
 // SetDefrost toggles "preconditioning max" — Tesla's defrost mode that
