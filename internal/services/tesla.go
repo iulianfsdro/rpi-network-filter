@@ -1004,6 +1004,143 @@ func (s *TeslaService) SetSteeringWheelHeater(ctx context.Context, userID int64,
 	})
 }
 
+// ─── V4.3: charge profile shortcuts ──────────────────────────────
+
+// ChargeMaxRange flips the charge limit to the Trip / Max-Range
+// preset (typically 100%). Tesla auto-restores Standard on next
+// completion when over-set.
+func (s *TeslaService) ChargeMaxRange(ctx context.Context, userID int64) error {
+	return s.runInfotainmentCommand(ctx, userID, "charge_max_range", true, func(car *vehicle.Vehicle) error {
+		return car.ChargeMaxRange(ctx)
+	})
+}
+
+func (s *TeslaService) ChargeStandardRange(ctx context.Context, userID int64) error {
+	return s.runInfotainmentCommand(ctx, userID, "charge_standard_range", true, func(car *vehicle.Vehicle) error {
+		return car.ChargeStandardRange(ctx)
+	})
+}
+
+// ─── V4.3: guest / drive / climate-keeper ────────────────────────
+
+func (s *TeslaService) SetGuestMode(ctx context.Context, userID int64, on bool) error {
+	name := "guest_mode_off"
+	if on {
+		name = "guest_mode_on"
+	}
+	return s.runInfotainmentCommand(ctx, userID, name, true, func(car *vehicle.Vehicle) error {
+		return car.SetGuestMode(ctx, on)
+	})
+}
+
+// RemoteDrive is Tesla's "remote start" — primes the drive system
+// so the operator can leave Park without the key. Acts as a key for
+// up to two minutes. Doesn't actually move the car.
+func (s *TeslaService) RemoteDrive(ctx context.Context, userID int64) error {
+	return s.runVCSECCommand(ctx, userID, "remote_drive", func(car *vehicle.Vehicle) error {
+		return car.RemoteDrive(ctx)
+	})
+}
+
+// SetClimateKeeperMode picks one of Off / On / Dog / Camp. The SDK
+// takes its own enum; we accept a string from the client (cleaner
+// JSON surface) and translate.
+func (s *TeslaService) SetClimateKeeperMode(ctx context.Context, userID int64, mode string) error {
+	var m vehicle.ClimateKeeperMode
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "off":
+		m = vehicle.ClimateKeeperModeOff
+	case "on":
+		m = vehicle.ClimateKeeperModeOn
+	case "dog":
+		m = vehicle.ClimateKeeperModeDog
+	case "camp":
+		m = vehicle.ClimateKeeperModeCamp
+	default:
+		return fmt.Errorf("invalid climate keeper mode %q (want off|on|dog|camp)", mode)
+	}
+	return s.runInfotainmentCommand(ctx, userID, "climate_keeper:"+mode, true, func(car *vehicle.Vehicle) error {
+		// The override flag controls whether a smart-precondition cycle
+		// can pre-empt; we pass false so manual mode is honoured.
+		return car.SetClimateKeeperMode(ctx, m, false)
+	})
+}
+
+// ─── V4.3: valet / speed-limit (PIN-protected) ───────────────────
+//
+// Each takes a string PIN. Tesla accepts 4-digit numeric PINs; we
+// validate that shape client-side. We do NOT log the PIN in audit
+// rows — the command name records the action; the PIN stays in the
+// signed BLE payload and never lands in tesla_command_log.
+
+func (s *TeslaService) SetValetMode(ctx context.Context, userID int64, on bool, pin string) error {
+	if on {
+		if err := validateTeslaPIN(pin); err != nil {
+			return fmt.Errorf("valet PIN: %w", err)
+		}
+	}
+	name := "valet_off"
+	if on {
+		name = "valet_on"
+	}
+	return s.runInfotainmentCommand(ctx, userID, name, true, func(car *vehicle.Vehicle) error {
+		return car.SetValetMode(ctx, on, pin)
+	})
+}
+
+func (s *TeslaService) ActivateSpeedLimit(ctx context.Context, userID int64, pin string) error {
+	if err := validateTeslaPIN(pin); err != nil {
+		return fmt.Errorf("speed-limit PIN: %w", err)
+	}
+	return s.runInfotainmentCommand(ctx, userID, "speed_limit_activate", true, func(car *vehicle.Vehicle) error {
+		return car.ActivateSpeedLimit(ctx, pin)
+	})
+}
+
+func (s *TeslaService) DeactivateSpeedLimit(ctx context.Context, userID int64, pin string) error {
+	if err := validateTeslaPIN(pin); err != nil {
+		return fmt.Errorf("speed-limit PIN: %w", err)
+	}
+	return s.runInfotainmentCommand(ctx, userID, "speed_limit_deactivate", true, func(car *vehicle.Vehicle) error {
+		return car.DeactivateSpeedLimit(ctx, pin)
+	})
+}
+
+func (s *TeslaService) ClearSpeedLimitPIN(ctx context.Context, userID int64, pin string) error {
+	if err := validateTeslaPIN(pin); err != nil {
+		return fmt.Errorf("speed-limit PIN: %w", err)
+	}
+	return s.runInfotainmentCommand(ctx, userID, "speed_limit_clear_pin", true, func(car *vehicle.Vehicle) error {
+		return car.ClearSpeedLimitPIN(ctx, pin)
+	})
+}
+
+// SetSpeedLimitMPH sets the cap in MPH. Tesla's UI prompts MPH even
+// in regions that prefer km/h — the underlying field is MPH on the wire.
+// Caller converts if needed.
+func (s *TeslaService) SetSpeedLimitMPH(ctx context.Context, userID int64, mph float64) error {
+	if mph < 50 || mph > 90 {
+		return fmt.Errorf("speed limit must be 50-90 MPH; got %v", mph)
+	}
+	return s.runInfotainmentCommand(ctx, userID, fmt.Sprintf("speed_limit_set:%v", mph), true, func(car *vehicle.Vehicle) error {
+		return car.SpeedLimitSetLimitMPH(ctx, mph)
+	})
+}
+
+// validateTeslaPIN constrains to 4 numeric digits, matching Tesla's
+// own onboarding constraint.
+func validateTeslaPIN(pin string) error {
+	if len(pin) != 4 {
+		return fmt.Errorf("PIN must be exactly 4 digits")
+	}
+	for _, c := range pin {
+		if c < '0' || c > '9' {
+			return fmt.Errorf("PIN must be numeric")
+		}
+	}
+	return nil
+}
+
 func (s *TeslaService) SetSentryMode(ctx context.Context, userID int64, on bool) error {
 	name := "sentry_off"
 	if on {

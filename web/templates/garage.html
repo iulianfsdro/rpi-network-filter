@@ -146,6 +146,14 @@
                                 <span>Time to full</span>
                                 <strong x-text="formatMinutes(charge.minutes_to_full)"></strong>
                             </div>
+                            <div class="form-row" style="margin-top:12px; gap:6px; flex-wrap:wrap;">
+                                <button class="btn ghost" @click="cmd('start-charging')">Start</button>
+                                <button class="btn ghost" @click="cmd('stop-charging')">Stop</button>
+                                <button class="btn ghost" @click="cmd('charge-standard-range')"
+                                        title="Snap to standard daily preset.">Standard</button>
+                                <button class="btn ghost" @click="cmd('charge-max-range')"
+                                        title="Snap to Max Range (≈100%) for road trips. Tesla auto-restores Standard after next completion.">Max range</button>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -238,6 +246,24 @@
                                     :title="climate.is_climate_on ? '' : 'Steering-wheel heat is tied to HVAC — turn climate on first, otherwise the toggle is a no-op on the car side.'">
                                 <span x-text="climate.steering_wheel_heater ? 'Wheel heat ON' : 'Wheel heat'"></span>
                             </button>
+                        </div>
+
+                        <!-- Climate Keeper picker. Off / On / Dog / Camp.
+                             Read-back state isn't exposed by the SDK as a clean
+                             field (ClimateState.GetClimateKeeperMode returns a
+                             oneof we haven't bothered parsing), so the buttons
+                             are write-only — operator picks one, action fires,
+                             no toggle state. -->
+                        <div style="margin-top:16px;">
+                            <div class="card-head-sub" style="margin-bottom:8px;">Climate keeper</div>
+                            <div class="form-row" style="gap:6px; flex-wrap:wrap;">
+                                <template x-for="mode in ['off','on','dog','camp']" :key="mode">
+                                    <button class="btn ghost"
+                                            @click="cmdJSON('set-climate-keeper-mode', { mode: mode })">
+                                        <span x-text="mode === 'off' ? 'Off' : mode === 'on' ? 'On' : mode === 'dog' ? 'Dog mode' : 'Camp mode'"></span>
+                                    </button>
+                                </template>
+                            </div>
                         </div>
 
                         <!-- Per-seat heater sliders. Tesla supports 0..3 (off/low/med/high). -->
@@ -438,6 +464,102 @@
                                 </div>
                             </div>
                         </template>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ── Security & access (V4.3) ──────────────────────── -->
+            <div class="card">
+                <div class="card-head">
+                    <div>
+                        <div class="card-head-title">Security &amp; access</div>
+                        <div class="card-head-sub">Guest mode · Remote drive · Valet · Speed limit (PIN-gated)</div>
+                    </div>
+                </div>
+                <div class="card-body">
+                    <div class="form-row" style="gap:8px; flex-wrap:wrap;">
+                        <button class="btn ghost" @click="cmd('guest-mode-on')"
+                                title="Allows other drivers to use the car without your saved settings or accounts.">
+                            Guest mode ON
+                        </button>
+                        <button class="btn ghost" @click="cmd('guest-mode-off')">Guest mode OFF</button>
+                        <button class="btn ghost" @click="cmd('remote-drive')"
+                                title="Tesla's remote-drive primer — sits in for the key for ~2 minutes. The car needs you in the driver's seat to actually move.">
+                            Remote drive
+                        </button>
+                        <button class="btn ghost" @click="valetDialogOpen = true">Valet…</button>
+                        <button class="btn ghost" @click="speedLimitDialogOpen = true">Speed limit…</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Valet dialog -->
+            <div x-show="valetDialogOpen" class="dialog-overlay" @click.self="valetDialogOpen = false" style="display:none;" x-cloak>
+                <div class="dialog">
+                    <div class="dialog-head">
+                        <h3>Valet mode</h3>
+                        <button class="btn ghost" @click="valetDialogOpen = false">×</button>
+                    </div>
+                    <div class="dialog-body">
+                        <p style="color:var(--muted); margin-bottom:12px;">
+                            Restricts speed + power, hides personal data, locks the frunk + glovebox.
+                            4-digit PIN is required to enable; the same PIN unlocks it back.
+                        </p>
+                        <div class="form-row" style="margin-bottom:12px;">
+                            <input type="password" class="input mono" maxlength="4" inputmode="numeric"
+                                   x-model="valetPin" placeholder="4-digit PIN" style="width:160px;">
+                        </div>
+                        <div class="form-row" style="gap:8px;">
+                            <button class="btn" :disabled="valetPin.length !== 4"
+                                    @click="cmdJSON('valet-on', { pin: valetPin }); valetDialogOpen = false; valetPin = '';">
+                                Enable
+                            </button>
+                            <button class="btn ghost"
+                                    @click="cmd('valet-off'); valetDialogOpen = false; valetPin = '';">
+                                Disable
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Speed-limit dialog -->
+            <div x-show="speedLimitDialogOpen" class="dialog-overlay" @click.self="speedLimitDialogOpen = false" style="display:none;" x-cloak>
+                <div class="dialog">
+                    <div class="dialog-head">
+                        <h3>Speed limit mode</h3>
+                        <button class="btn ghost" @click="speedLimitDialogOpen = false">×</button>
+                    </div>
+                    <div class="dialog-body">
+                        <p style="color:var(--muted); margin-bottom:12px;">
+                            Caps the car's top speed. Set the cap in MPH (Tesla's wire field is MPH
+                            regardless of region) — 50 to 90.
+                            Activate / deactivate / clear-PIN all require the SAME 4-digit PIN.
+                        </p>
+                        <div class="form-row" style="margin-bottom:12px; gap:8px;">
+                            <input type="number" class="input mono" min="50" max="90"
+                                   x-model.number="speedLimitMph" placeholder="MPH" style="width:90px;">
+                            <input type="password" class="input mono" maxlength="4" inputmode="numeric"
+                                   x-model="speedLimitPin" placeholder="4-digit PIN" style="width:160px;">
+                        </div>
+                        <div class="form-row" style="gap:8px; flex-wrap:wrap;">
+                            <button class="btn" :disabled="!speedLimitMph || speedLimitMph < 50 || speedLimitMph > 90"
+                                    @click="cmdJSON('speed-limit-set', { mph: Number(speedLimitMph) });">
+                                Set MPH
+                            </button>
+                            <button class="btn" :disabled="speedLimitPin.length !== 4"
+                                    @click="cmdJSON('speed-limit-activate', { pin: speedLimitPin });">
+                                Activate
+                            </button>
+                            <button class="btn ghost" :disabled="speedLimitPin.length !== 4"
+                                    @click="cmdJSON('speed-limit-deactivate', { pin: speedLimitPin });">
+                                Deactivate
+                            </button>
+                            <button class="btn ghost" :disabled="speedLimitPin.length !== 4"
+                                    @click="cmdJSON('speed-limit-clear-pin', { pin: speedLimitPin });">
+                                Clear PIN
+                            </button>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -700,6 +822,28 @@ function garageApp() {
             }
         },
 
+        // cmdJSON is cmd's sibling for commands that need a JSON body
+        // (set-climate-keeper-mode, set-charging-limit, valet-on,
+        // speed-limit-*). Same fire-and-forget shape as cmd, just with
+        // a payload. Doesn't apply optimistic UI — these commands don't
+        // have a single toggle to mirror locally.
+        async cmdJSON(name, body) {
+            try {
+                await api.post('/api/tesla/commands/' + name, body);
+                notify(name.replace(/-/g, ' ') + ' ✓', 'success');
+                const fullRefreshHints = [
+                    'charge', 'climate', 'sentry',
+                    'cabin-overheat', 'defrost', 'heater', 'window',
+                    'valet', 'speed-limit', 'guest',
+                ];
+                const needsFull = fullRefreshHints.some(h => name.includes(h));
+                setTimeout(() => this.refresh(needsFull ? 'full' : 'bcs'), 1500);
+                this.loadLog();
+            } catch (e) {
+                notify(e.message || (name + ' failed'), 'danger');
+            }
+        },
+
         // optimisticToggle flips a local state field immediately, fires
         // the command in the background, and reverts on failure.
         //
@@ -863,6 +1007,16 @@ function garageApp() {
         // change it or reload the page. Front seats only (Plaid / Cybertruck
         // hardware; other vehicles' controllers silently ignore the action).
         seatCoolerDrafts: { 'front-left': 0, 'front-right': 0 },
+
+        // V4.3: Valet + Speed-Limit PIN-gated dialogs. PINs live on the
+        // local model only — we send them in the JSON body and the
+        // service-side wrapper passes them straight to the SDK without
+        // logging. The dialog input clears on close.
+        valetDialogOpen: false,
+        valetPin: '',
+        speedLimitDialogOpen: false,
+        speedLimitPin: '',
+        speedLimitMph: 70,
         _fresh(ms) {
             if (ms == null) return 'never polled';
             if (ms < 5000)   return 'fresh';
@@ -999,6 +1153,23 @@ function garageApp() {
 .badge.muted { background: rgba(129, 129, 129, 0.15); color: var(--muted); }
 .form-error { color: var(--danger); margin-top: 8px; font-size: 13px; }
 .empty { padding: 24px; text-align: center; color: var(--muted); }
+/* Dialog overlay for Valet / Speed-limit PIN entry. Kept minimal:
+   full-page dim, centred panel, no animation. The browser's own
+   focus / keyboard handling is enough at this scope. */
+[x-cloak] { display: none !important; }
+.dialog-overlay {
+    position: fixed; inset: 0; z-index: 50;
+    background: rgba(0,0,0,0.7);
+    display: flex; align-items: center; justify-content: center;
+    padding: 20px;
+}
+.dialog {
+    background: var(--bg-elev); border: 1px solid var(--line);
+    border-radius: 12px; padding: 0; max-width: 480px; width: 100%;
+}
+.dialog-head { display: flex; align-items: center; justify-content: space-between; padding: 16px 20px; border-bottom: 1px solid var(--line); }
+.dialog-head h3 { margin: 0; font-size: 16px; font-weight: 600; }
+.dialog-body { padding: 20px; }
 .tire-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
 .tire-card {
     padding: 14px; border-radius: 10px; background: #161616;

@@ -316,6 +316,74 @@ func (h *TeslaHandler) Command(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		err = h.tesla.SetSeatCooler(ctx, userID, body.Position, body.Level)
+
+	// ─── V4.3 in-SDK commands ──────────────────────────────────
+	case "charge-max-range":
+		err = h.tesla.ChargeMaxRange(ctx, userID)
+	case "charge-standard-range":
+		err = h.tesla.ChargeStandardRange(ctx, userID)
+	case "guest-mode-on":
+		err = h.tesla.SetGuestMode(ctx, userID, true)
+	case "guest-mode-off":
+		err = h.tesla.SetGuestMode(ctx, userID, false)
+	case "remote-drive":
+		err = h.tesla.RemoteDrive(ctx, userID)
+	case "set-climate-keeper-mode":
+		var body struct {
+			Mode string `json:"mode"`
+		}
+		if derr := decodeJSON(r, &body); derr != nil {
+			JSONError(w, http.StatusBadRequest, derr.Error())
+			return
+		}
+		err = h.tesla.SetClimateKeeperMode(ctx, userID, body.Mode)
+	case "valet-on":
+		var body struct {
+			Pin string `json:"pin"`
+		}
+		if derr := decodeJSON(r, &body); derr != nil {
+			JSONError(w, http.StatusBadRequest, derr.Error())
+			return
+		}
+		err = h.tesla.SetValetMode(ctx, userID, true, body.Pin)
+	case "valet-off":
+		err = h.tesla.SetValetMode(ctx, userID, false, "")
+	case "speed-limit-activate":
+		var body struct {
+			Pin string `json:"pin"`
+		}
+		if derr := decodeJSON(r, &body); derr != nil {
+			JSONError(w, http.StatusBadRequest, derr.Error())
+			return
+		}
+		err = h.tesla.ActivateSpeedLimit(ctx, userID, body.Pin)
+	case "speed-limit-deactivate":
+		var body struct {
+			Pin string `json:"pin"`
+		}
+		if derr := decodeJSON(r, &body); derr != nil {
+			JSONError(w, http.StatusBadRequest, derr.Error())
+			return
+		}
+		err = h.tesla.DeactivateSpeedLimit(ctx, userID, body.Pin)
+	case "speed-limit-clear-pin":
+		var body struct {
+			Pin string `json:"pin"`
+		}
+		if derr := decodeJSON(r, &body); derr != nil {
+			JSONError(w, http.StatusBadRequest, derr.Error())
+			return
+		}
+		err = h.tesla.ClearSpeedLimitPIN(ctx, userID, body.Pin)
+	case "speed-limit-set":
+		var body struct {
+			MPH float64 `json:"mph"`
+		}
+		if derr := decodeJSON(r, &body); derr != nil {
+			JSONError(w, http.StatusBadRequest, derr.Error())
+			return
+		}
+		err = h.tesla.SetSpeedLimitMPH(ctx, userID, body.MPH)
 	default:
 		JSONError(w, http.StatusNotFound, "unknown command")
 		return
