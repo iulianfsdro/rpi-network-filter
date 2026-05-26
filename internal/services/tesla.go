@@ -1195,7 +1195,15 @@ func (s *TeslaService) updateClimate(cl *carserver.ClimateState) {
 	s.snap.SteeringWheelHeater = cl.GetSteeringWheelHeater()
 	s.snap.FrontDefrosterOn = cl.GetIsFrontDefrosterOn()
 	s.snap.RearDefrosterOn = cl.GetIsRearDefrosterOn()
-	s.snap.CabinOverheatProtection = cl.GetAllowCabinOverheatProtection()
+	// GetAllowCabinOverheatProtection is the FEATURE-PERMITTED bit
+	// (is COP supported / not blocked by user prefs). The actual
+	// current state is the enum on GetCabinOverheatProtection —
+	// Off / On / FanOnly. We collapse FanOnly to "on" for the toggle
+	// since the operator-facing distinction doesn't matter at the
+	// /garage level (it'd matter on a dedicated COP settings dialog).
+	cop := cl.GetCabinOverheatProtection()
+	s.snap.CabinOverheatProtection = cop == carserver.ClimateState_CabinOverheatProtectionOn ||
+		cop == carserver.ClimateState_CabinOverheatProtectionFanOnly
 }
 
 // updateClosures takes the CarServer (Infotainment) ClosuresState —
@@ -1216,17 +1224,19 @@ func (s *TeslaService) updateClosures(cs *carserver.ClosuresState) {
 	s.snap.Closures.WindowPassengerRear = cs.GetWindowOpenPassengerRear()
 	s.snap.Closures.SentryAvailable = cs.GetSentryModeAvailable()
 	if sm := cs.GetSentryModeState(); sm != nil {
-		// SentryModeState is a oneof — GetType() returns an interface
-		// whose concrete type tells us which state we're in. Armed +
-		// Aware + Panic all count as "on" from an operator's POV
-		// (the car is actively monitoring); Off + Idle are off.
+		// SentryModeState is a oneof; GetType() returns the variant.
+		// "Sentry enabled" from the operator's perspective covers four
+		// of the five variants — Off is the only state that means
+		// "the feature is disabled." Idle is the typical resting state
+		// when Sentry is enabled but no event has triggered, and the
+		// earlier code wrongly classified that as off — making the
+		// toggle button always send 'on' even when sentry was already
+		// running.
 		switch sm.GetType().(type) {
-		case *carserver.ClosuresState_SentryModeState_Armed,
-			*carserver.ClosuresState_SentryModeState_Aware,
-			*carserver.ClosuresState_SentryModeState_Panic:
-			s.snap.Closures.SentryOn = true
-		default:
+		case *carserver.ClosuresState_SentryModeState_Off:
 			s.snap.Closures.SentryOn = false
+		default:
+			s.snap.Closures.SentryOn = true
 		}
 	}
 }

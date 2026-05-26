@@ -215,7 +215,8 @@
                             <button class="btn"
                                     :class="climate.steering_wheel_heater ? '' : 'ghost'"
                                     @click="cmd(climate.steering_wheel_heater ? 'steering-wheel-heater-off' : 'steering-wheel-heater-on')"
-                                    :disabled="busy">
+                                    :disabled="busy || !climate.is_climate_on"
+                                    :title="climate.is_climate_on ? '' : 'Steering-wheel heat is tied to HVAC — turn climate on first, otherwise the toggle is a no-op on the car side.'">
                                 <span x-text="climate.steering_wheel_heater ? 'Wheel heat ON' : 'Wheel heat'"></span>
                             </button>
                         </div>
@@ -276,11 +277,21 @@
                                     :disabled="busy">
                                 <span x-text="((vcsec || {}).closures || {}).sentry_on ? 'Sentry ON' : 'Sentry'"></span>
                             </button>
+                            <!-- Keep-accessory-power can't be read back from the car
+                                 (Tesla's BLE proto only has the write action, no
+                                 corresponding state field). Show explicit on/off so the
+                                 button isn't lying about a state it doesn't actually know. -->
                             <button class="btn ghost"
                                     @click="cmd('keep-accessory-power-on')"
                                     :disabled="busy"
-                                    title="Keep cabin powered after Park — drains ~1%/hour from the 12V. Toggle off via climate-off when done.">
-                                Keep accessory power
+                                    title="Keep cabin powered after Park. Drains ~1%/h. Tesla doesn't report this state back, so the button can only fire one direction.">
+                                KAP on
+                            </button>
+                            <button class="btn ghost"
+                                    @click="cmd('keep-accessory-power-off')"
+                                    :disabled="busy"
+                                    title="Disable keep-accessory-power.">
+                                KAP off
                             </button>
                             <button class="btn ghost" @click="cmd('wake')" :disabled="busy">Wake</button>
                         </div>
