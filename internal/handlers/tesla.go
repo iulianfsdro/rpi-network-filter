@@ -338,6 +338,17 @@ func teslaCtx(r *http.Request, max time.Duration) (context.Context, context.Canc
 	return context.WithTimeout(r.Context(), max)
 }
 
+// derefBool turns a *bool into either the underlying bool or nil, so
+// encoding/json emits a JSON boolean or null. The /garage closureCards
+// getter uses `typeof v === 'boolean'` to detect presence — null fails
+// that test and the UI falls back to VCSEC's string for that closure.
+func derefBool(p *bool) any {
+	if p == nil {
+		return nil
+	}
+	return *p
+}
+
 // serializeSnapshot flattens the VehicleSnapshot into the JSON the
 // /garage UI expects. Freshness fields go out as integer milliseconds
 // (or null when never polled) so the front-end can render
@@ -372,16 +383,19 @@ func serializeSnapshot(s services.VehicleSnapshot) map[string]any {
 				"window_passenger_front": s.Closures.WindowPassengerFront,
 				"window_driver_rear":     s.Closures.WindowDriverRear,
 				"window_passenger_rear":  s.Closures.WindowPassengerRear,
-				// Infotainment-sourced door/trunk/lock bools — used by the
-				// UI as the canonical view when present, since VCSEC's
-				// equivalents lag physical reality.
-				"inf_door_driver_front":    s.Closures.InfDoorOpenDriverFront,
-				"inf_door_passenger_front": s.Closures.InfDoorOpenPassengerFront,
-				"inf_door_driver_rear":     s.Closures.InfDoorOpenDriverRear,
-				"inf_door_passenger_rear":  s.Closures.InfDoorOpenPassengerRear,
-				"inf_frunk_open":           s.Closures.InfTrunkFrontOpen,
-				"inf_trunk_open":           s.Closures.InfTrunkRearOpen,
-				"inf_locked":               s.Closures.InfLocked,
+				// Infotainment-sourced door/trunk/lock bools. Each is a
+				// *bool on the server: nil when Tesla didn't emit the
+				// proto3 optional for this vehicle, real bool when it
+				// did. encoding/json renders nil pointers as null,
+				// which the client sees as missing → falls back to
+				// VCSEC for that one closure.
+				"inf_door_driver_front":    derefBool(s.Closures.InfDoorOpenDriverFront),
+				"inf_door_passenger_front": derefBool(s.Closures.InfDoorOpenPassengerFront),
+				"inf_door_driver_rear":     derefBool(s.Closures.InfDoorOpenDriverRear),
+				"inf_door_passenger_rear":  derefBool(s.Closures.InfDoorOpenPassengerRear),
+				"inf_frunk_open":           derefBool(s.Closures.InfTrunkFrontOpen),
+				"inf_trunk_open":           derefBool(s.Closures.InfTrunkRearOpen),
+				"inf_locked":               derefBool(s.Closures.InfLocked),
 				"sentry_available":         s.Closures.SentryAvailable,
 				"sentry_on":                s.Closures.SentryOn,
 			},

@@ -179,20 +179,25 @@ type ClosuresSnapshot struct {
 	WindowDriverRear     bool
 	WindowPassengerRear  bool
 
-	// CarServer ClosuresState ALSO reports door + trunk + frunk + lock
-	// as plain bools. Tesla's VCSEC closure sensor for these lags
-	// physical reality by hours sometimes — we've reproduced "frunk
-	// still showing open at 18:00 after closing it at 09:00" because
-	// VCSEC never updated its own snapshot. The Infotainment view in
-	// ClosuresState is sourced closer to the actual latches and
-	// refreshes within seconds. Prefer it when fresh.
-	InfDoorOpenDriverFront    bool
-	InfDoorOpenPassengerFront bool
-	InfDoorOpenDriverRear     bool
-	InfDoorOpenPassengerRear  bool
-	InfTrunkFrontOpen         bool // frunk
-	InfTrunkRearOpen          bool // trunk
-	InfLocked                 bool
+	// CarServer ClosuresState ALSO reports door + trunk + frunk + lock,
+	// but as proto3 OPTIONAL fields wrapped in oneofs. The car may or
+	// may not emit each one depending on firmware / model — empirically
+	// the user's 2024 Berlin Model Y emits windows + sentry but NOT
+	// the door/trunk/frunk optionals. When unset, the SDK's plain
+	// bool getter returns false regardless of physical state, which
+	// would let "closed" pin permanently.
+	//
+	// So we store these as *bool: nil = "Tesla didn't emit this field
+	// for this vehicle", non-nil = "Tesla emitted it, here's the
+	// actual state." The UI uses VCSEC's string as the fallback
+	// whenever the Infotainment override is nil.
+	InfDoorOpenDriverFront    *bool
+	InfDoorOpenPassengerFront *bool
+	InfDoorOpenDriverRear     *bool
+	InfDoorOpenPassengerRear  *bool
+	InfTrunkFrontOpen         *bool // frunk
+	InfTrunkRearOpen          *bool // trunk
+	InfLocked                 *bool
 
 	// Sentry mode lives on CarServer ClosuresState too.
 	SentryAvailable bool
@@ -1299,13 +1304,16 @@ func (s *TeslaService) updateClosures(cs *carserver.ClosuresState) {
 	s.snap.Closures.WindowPassengerFront = cs.GetWindowOpenPassengerFront()
 	s.snap.Closures.WindowDriverRear = cs.GetWindowOpenDriverRear()
 	s.snap.Closures.WindowPassengerRear = cs.GetWindowOpenPassengerRear()
-	s.snap.Closures.InfDoorOpenDriverFront = cs.GetDoorOpenDriverFront()
-	s.snap.Closures.InfDoorOpenPassengerFront = cs.GetDoorOpenPassengerFront()
-	s.snap.Closures.InfDoorOpenDriverRear = cs.GetDoorOpenDriverRear()
-	s.snap.Closures.InfDoorOpenPassengerRear = cs.GetDoorOpenPassengerRear()
-	s.snap.Closures.InfTrunkFrontOpen = cs.GetDoorOpenTrunkFront()
-	s.snap.Closures.InfTrunkRearOpen = cs.GetDoorOpenTrunkRear()
-	s.snap.Closures.InfLocked = cs.GetLocked()
+	// Each closure is wrapped in a proto3 optional/oneof. Read the
+	// oneof itself (not the plain Get*) so we can distinguish
+	// "field set to false" from "field never emitted." Helper below.
+	s.snap.Closures.InfDoorOpenDriverFront = boolFromDoorOpenDriverFront(cs)
+	s.snap.Closures.InfDoorOpenPassengerFront = boolFromDoorOpenPassengerFront(cs)
+	s.snap.Closures.InfDoorOpenDriverRear = boolFromDoorOpenDriverRear(cs)
+	s.snap.Closures.InfDoorOpenPassengerRear = boolFromDoorOpenPassengerRear(cs)
+	s.snap.Closures.InfTrunkFrontOpen = boolFromDoorOpenTrunkFront(cs)
+	s.snap.Closures.InfTrunkRearOpen = boolFromDoorOpenTrunkRear(cs)
+	s.snap.Closures.InfLocked = boolFromLocked(cs)
 	s.snap.Closures.SentryAvailable = cs.GetSentryModeAvailable()
 	if sm := cs.GetSentryModeState(); sm != nil {
 		// SentryModeState is a oneof; GetType() returns the variant.
@@ -1402,6 +1410,71 @@ func closureStateString(c vcsec.ClosureState_E) string {
 	default:
 		return "unknown"
 	}
+}
+
+// boolFromDoorOpen* + boolFromLocked: per-field proto3-optional readers.
+// Each returns *bool — nil when the car didn't emit the optional, the
+// real bool when it did. The UI uses this to distinguish "Tesla
+// reports closed" from "Tesla reports nothing, fall back to VCSEC".
+//
+// We can't write one generic helper because each oneof's concrete
+// type is distinct in the SDK; the cost is one function per closure,
+// the win is "frunk no longer pins at closed forever" on Model Y.
+
+func boolFromDoorOpenDriverFront(cs *carserver.ClosuresState) *bool {
+	if x, ok := cs.GetOptionalDoorOpenDriverFront().(*carserver.ClosuresState_DoorOpenDriverFront); ok {
+		v := x.DoorOpenDriverFront
+		return &v
+	}
+	return nil
+}
+
+func boolFromDoorOpenPassengerFront(cs *carserver.ClosuresState) *bool {
+	if x, ok := cs.GetOptionalDoorOpenPassengerFront().(*carserver.ClosuresState_DoorOpenPassengerFront); ok {
+		v := x.DoorOpenPassengerFront
+		return &v
+	}
+	return nil
+}
+
+func boolFromDoorOpenDriverRear(cs *carserver.ClosuresState) *bool {
+	if x, ok := cs.GetOptionalDoorOpenDriverRear().(*carserver.ClosuresState_DoorOpenDriverRear); ok {
+		v := x.DoorOpenDriverRear
+		return &v
+	}
+	return nil
+}
+
+func boolFromDoorOpenPassengerRear(cs *carserver.ClosuresState) *bool {
+	if x, ok := cs.GetOptionalDoorOpenPassengerRear().(*carserver.ClosuresState_DoorOpenPassengerRear); ok {
+		v := x.DoorOpenPassengerRear
+		return &v
+	}
+	return nil
+}
+
+func boolFromDoorOpenTrunkFront(cs *carserver.ClosuresState) *bool {
+	if x, ok := cs.GetOptionalDoorOpenTrunkFront().(*carserver.ClosuresState_DoorOpenTrunkFront); ok {
+		v := x.DoorOpenTrunkFront
+		return &v
+	}
+	return nil
+}
+
+func boolFromDoorOpenTrunkRear(cs *carserver.ClosuresState) *bool {
+	if x, ok := cs.GetOptionalDoorOpenTrunkRear().(*carserver.ClosuresState_DoorOpenTrunkRear); ok {
+		v := x.DoorOpenTrunkRear
+		return &v
+	}
+	return nil
+}
+
+func boolFromLocked(cs *carserver.ClosuresState) *bool {
+	if x, ok := cs.GetOptionalLocked().(*carserver.ClosuresState_Locked); ok {
+		v := x.Locked
+		return &v
+	}
+	return nil
 }
 
 func chargingStateString(c *carserver.ChargeState_ChargingState) string {
