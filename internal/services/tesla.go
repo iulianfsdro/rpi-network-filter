@@ -769,9 +769,36 @@ func seatPositionFromString(s string) (vehicle.SeatPosition, bool) {
 		return vehicle.SeatFrontRight, true
 	case "rear-left":
 		return vehicle.SeatSecondRowLeft, true
+	case "rear-center":
+		return vehicle.SeatSecondRowCenter, true
+	case "rear-right":
+		return vehicle.SeatSecondRowRight, true
 	default:
 		return vehicle.SeatUnknown, false
 	}
+}
+
+// SetSeatCooler is the cooled-seat sibling of SetSeatHeater. Tesla
+// only supports it on the two front seats (Plaid / Cybertruck);
+// other vehicles will accept the action but the car-side controller
+// silently no-ops. Tesla also does NOT report cooler level back in
+// any state category, so the UI can't sync a slider to current
+// reality — operator-set values stick locally until the page reloads.
+func (s *TeslaService) SetSeatCooler(ctx context.Context, userID int64, position string, level int) error {
+	seat, ok := seatPositionFromString(position)
+	if !ok {
+		return fmt.Errorf("invalid seat position %q", position)
+	}
+	if seat != vehicle.SeatFrontLeft && seat != vehicle.SeatFrontRight {
+		return fmt.Errorf("seat coolers exist only on front seats; got %q", position)
+	}
+	if level < 0 || level > 3 {
+		return fmt.Errorf("seat cooler level %d out of range (0-3)", level)
+	}
+	name := fmt.Sprintf("seat_cooler:%s=%d", position, level)
+	return s.runInfotainmentCommand(ctx, userID, name, true, func(car *vehicle.Vehicle) error {
+		return car.SetSeatCooler(ctx, vehicle.Level(level), seat)
+	})
 }
 
 // SetSteeringWheelHeater is the simple on/off; some models also support

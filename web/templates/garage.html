@@ -239,6 +239,32 @@
                                 </div>
                             </template>
                         </div>
+
+                        <!-- Front seat coolers (Plaid + Cybertruck only).
+                             Tesla doesn't echo cooler level via state, so the
+                             slider reflects local intent, not car-side truth. -->
+                        <div style="margin-top:16px;">
+                            <div class="card-head-sub" style="margin-bottom:8px;">
+                                Seat coolers
+                                <span style="color:var(--muted); font-weight:400; margin-left:6px;">
+                                    front only · Plaid / Cybertruck
+                                </span>
+                            </div>
+                            <template x-for="pos in ['front-left', 'front-right']" :key="pos">
+                                <div class="stat-row">
+                                    <span x-text="pos === 'front-left' ? 'Driver' : 'Passenger'"></span>
+                                    <div style="display:flex; align-items:center; gap:8px;">
+                                        <input type="range" min="0" max="3" step="1"
+                                               :value="seatCoolerDrafts[pos]"
+                                               @change="setSeatCooler(pos, $event.target.value)"
+                                               :disabled="busy"
+                                               style="width:120px;">
+                                        <strong style="min-width:48px; text-align:right;"
+                                                x-text="['off','low','med','high'][seatCoolerDrafts[pos]]"></strong>
+                                    </div>
+                                </div>
+                            </template>
+                        </div>
                     </div>
                 </div>
 
@@ -579,17 +605,17 @@ function garageApp() {
             try {
                 await api.post('/api/tesla/commands/' + name, {});
                 notify(name.replace(/-/g, ' ') + ' ✓', 'success');
-                // VCSEC's charge-port closure sensor lags real life, so
-                // for charge-port commands re-poll the Infotainment
-                // ChargeState too — it reports charge_port_door_open
-                // accurately. Other commands stick with the cheap BCS
-                // re-poll.
-                const needsFull = name === 'open-charge-port' ||
-                                  name === 'close-charge-port' ||
-                                  name === 'climate-on' ||
-                                  name === 'climate-off' ||
-                                  name === 'start-charging' ||
-                                  name === 'stop-charging';
+                // Most commands change state outside VCSEC's body-controller
+                // view — charge port / climate / sentry / cabin / defrost /
+                // heater levels all live in Infotainment domain. We re-poll
+                // the FULL state (which wakes infotainment if asleep) for
+                // any command that touches one of those. Lock/unlock/wake/
+                // honk/flash/frunk/trunk/homelink stay on cheap BCS-only.
+                const fullRefreshHints = [
+                    'charge-port', 'climate', 'charging', 'sentry',
+                    'cabin-overheat', 'defrost', 'heater', 'window',
+                ];
+                const needsFull = fullRefreshHints.some(h => name.includes(h));
                 setTimeout(() => this.refresh(needsFull ? 'full' : 'bcs'), 1500);
                 this.loadLog();
             } catch (e) {
@@ -639,6 +665,25 @@ function garageApp() {
             }
         },
 
+        // setSeatCooler — front seats only. Tesla doesn't echo level
+        // back via state, so we stash the local draft on the controller
+        // and don't try to round-trip it.
+        async setSeatCooler(position, level) {
+            this.busy = true;
+            this.seatCoolerDrafts[position] = Number(level);
+            try {
+                await api.post('/api/tesla/commands/set-seat-cooler', {
+                    position: position, level: Number(level)
+                });
+                notify(position + ' cooler → ' + ['off','low','med','high'][level], 'success');
+                this.loadLog();
+            } catch (e) {
+                notify(e.message || 'seat cooler failed', 'danger');
+            } finally {
+                this.busy = false;
+            }
+        },
+
         // ── derived UI helpers ─────────────────────────────────
         get vcsecFreshnessLabel() { return this._fresh(this.bcsFreshnessMs); },
         get chargeFreshnessLabel() { return this._fresh(this.chargeFreshnessMs); },
@@ -673,12 +718,24 @@ function garageApp() {
         },
 
         get seatHeaters() {
+            // All five Model Y / Model 3 seats. On vehicles without a
+            // rear-center seat (older Model 3), that value stays 0 and
+            // the slider is still useful — the action just no-ops on
+            // the car side.
             return [
-                { position: 'front-left',  label: 'Driver',     level: this.climate.seat_heater_left || 0 },
-                { position: 'front-right', label: 'Passenger',  level: this.climate.seat_heater_right || 0 },
-                { position: 'rear-left',   label: 'Rear left',  level: this.climate.seat_heater_rear_left || 0 },
+                { position: 'front-left',  label: 'Driver',       level: this.climate.seat_heater_left || 0 },
+                { position: 'front-right', label: 'Passenger',    level: this.climate.seat_heater_right || 0 },
+                { position: 'rear-left',   label: 'Rear left',    level: this.climate.seat_heater_rear_left || 0 },
+                { position: 'rear-center', label: 'Rear center',  level: this.climate.seat_heater_rear_center || 0 },
+                { position: 'rear-right',  label: 'Rear right',   level: this.climate.seat_heater_rear_right || 0 },
             ];
         },
+
+        // Seat coolers — Tesla doesn't report current level back, so this
+        // is a local-only mirror. Operator-set value stays put until they
+        // change it or reload the page. Front seats only (Plaid / Cybertruck
+        // hardware; other vehicles' controllers silently ignore the action).
+        seatCoolerDrafts: { 'front-left': 0, 'front-right': 0 },
         _fresh(ms) {
             if (ms == null) return 'never polled';
             if (ms < 5000)   return 'fresh';

@@ -306,6 +306,16 @@ func (h *TeslaHandler) Command(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		err = h.tesla.SetSeatHeater(ctx, userID, body.Position, body.Level)
+	case "set-seat-cooler":
+		var body struct {
+			Position string `json:"position"`
+			Level    int    `json:"level"`
+		}
+		if derr := decodeJSON(r, &body); derr != nil {
+			JSONError(w, http.StatusBadRequest, derr.Error())
+			return
+		}
+		err = h.tesla.SetSeatCooler(ctx, userID, body.Position, body.Level)
 	default:
 		JSONError(w, http.StatusNotFound, "unknown command")
 		return
