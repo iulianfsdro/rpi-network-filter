@@ -300,12 +300,32 @@
                             <button class="btn" @click="cmd('unlock')">Unlock</button>
                             <button class="btn" @click="cmd('flash-lights')">Flash lights</button>
                             <button class="btn" @click="cmd('honk')">Honk</button>
-                            <button class="btn" @click="cmd('open-frunk')">Frunk</button>
-                            <button class="btn" @click="cmd('open-trunk')">Trunk</button>
+                            <!-- Frunk: SDK only exposes OpenFrunk, which actuates as a
+                                 toggle on cars with a powered frunk (2024 Berlin Y, Cybertruck,
+                                 Plaid). Send the same command in both directions; the optimistic
+                                 lock holds the UI's new state through VCSEC's typical close-lag. -->
                             <button class="btn"
-                                    @click="cmd(chargePortOpen ? 'close-charge-port' : 'open-charge-port')"
-
-                                    title="Toggles the charge port flap based on its current closure state.">
+                                    @click="optimisticToggle('open-frunk',
+                                        () => setLocalClosure('front_trunk', 'inf_frunk_open', !closureIsOpen('front_trunk')),
+                                        () => setLocalClosure('front_trunk', 'inf_frunk_open', closureIsOpen('front_trunk')),
+                                        'full', closureLockMs)">
+                                <span x-text="closureIsOpen('front_trunk') ? 'Close frunk' : 'Open frunk'"></span>
+                            </button>
+                            <button class="btn"
+                                    @click="optimisticToggle(
+                                        closureIsOpen('rear_trunk') ? 'close-trunk' : 'open-trunk',
+                                        () => setLocalClosure('rear_trunk', 'inf_trunk_open', !closureIsOpen('rear_trunk')),
+                                        () => setLocalClosure('rear_trunk', 'inf_trunk_open', closureIsOpen('rear_trunk')),
+                                        'full', closureLockMs)">
+                                <span x-text="closureIsOpen('rear_trunk') ? 'Close trunk' : 'Open trunk'"></span>
+                            </button>
+                            <button class="btn"
+                                    @click="optimisticToggle(
+                                        chargePortOpen ? 'close-charge-port' : 'open-charge-port',
+                                        () => setLocalClosure('charge_port', null, !chargePortOpen),
+                                        () => setLocalClosure('charge_port', null, chargePortOpen),
+                                        'full', closureLockMs)"
+                                    title="Toggles the charge port flap. Optimistic UI — the new state holds for 5 minutes even if Tesla's body controller sensor lags.">
                                 <span x-text="chargePortOpen ? 'Close charge port' : 'Open charge port'"></span>
                             </button>
                             <button class="btn"
@@ -683,18 +703,23 @@ function garageApp() {
         // optimisticToggle flips a local state field immediately, fires
         // the command in the background, and reverts on failure.
         //
-        // optimisticLockUntil is set to now+10s as soon as we apply.
-        // Background polls (every 15s, reading the daemon's cached
-        // snapshot) check this and skip updating local state during the
-        // window — otherwise the cached snapshot (which still has the
-        // pre-toggle value) would overwrite the optimistic flip and
-        // the user would see the button rubber-band back, then back
-        // again once the post-command full refresh lands. The window
-        // covers ~1.5s (full refresh setTimeout) + a couple seconds
-        // for the actual BLE round-trip + slack.
-        async optimisticToggle(commandName, apply, revert, refreshKind) {
+        // lockMs (default 10s) controls how long the background poll
+        // is suppressed from overwriting local state. Closure-affecting
+        // commands (open/close frunk/trunk/charge port) pass 5 minutes
+        // because Tesla's VCSEC closure sensor lags physical reality
+        // — the post-command full refresh often pulls back a stale
+        // "still open" from the body controller, which would flip the
+        // optimistic UI back. 5 minutes is enough for either:
+        //   (a) the sensor to catch up and the cache to agree, OR
+        //   (b) the operator to physically verify the actuation took
+        //       and accept the truth.
+        async optimisticToggle(commandName, apply, revert, refreshKind, lockMs) {
             apply();
-            this.optimisticLockUntil = Date.now() + 10000;
+            const newUntil = Date.now() + (lockMs || 10000);
+            // Extend, never shrink, in case another toggle is mid-flight.
+            if (newUntil > this.optimisticLockUntil) {
+                this.optimisticLockUntil = newUntil;
+            }
             try {
                 await api.post('/api/tesla/commands/' + commandName, {});
                 notify(commandName.replace(/-/g, ' ') + ' ✓', 'success');
@@ -704,6 +729,35 @@ function garageApp() {
                 revert();
                 notify(e.message || (commandName + ' failed'), 'danger');
                 this.optimisticLockUntil = 0; // clear immediately on error
+            }
+        },
+
+        // closureLockMs is the long-lock window used by closure toggles.
+        // Five minutes covers nearly every observed VCSEC lag case.
+        closureLockMs: 5 * 60 * 1000,
+
+        // closureIsOpen returns whether the operator's view of the
+        // closure (per the closureCards getter, with Infotainment
+        // override) currently shows open. Used by the smart-toggle
+        // buttons to pick the right next command.
+        closureIsOpen(key) {
+            const card = this.closureCards.find(c => c.key === key);
+            return !!(card && card.open);
+        },
+
+        // setLocalClosure writes a string state into vcsec.closures[key]
+        // and the matching boolean into the Infotainment override (so
+        // the closureCards getter picks it up via either path). This is
+        // what the optimistic apply / revert functions call.
+        setLocalClosure(key, infKey, open) {
+            this.vcsec.closures = this.vcsec.closures || {};
+            this.vcsec.closures[key] = open ? 'open' : 'closed';
+            if (infKey) {
+                this.vcsec.closures[infKey] = open;
+            }
+            if (key === 'charge_port') {
+                this.charge = this.charge || {};
+                this.charge.charge_port_open = open;
             }
         },
 
