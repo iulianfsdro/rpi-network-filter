@@ -700,17 +700,23 @@ func (s *TeslaService) CloseWindows(ctx context.Context, userID int64) error {
 
 // SetDefrost toggles "preconditioning max" — Tesla's defrost mode that
 // fires the front/rear defrosters + seat heaters + cabin heater hard
-// regardless of climate setpoint. manualOverride=false lets the car
-// auto-end when conditions are clear; we pass true so the operator's
-// intent (typically "I'm getting in soon, melt the ice") sticks until
-// they turn it off.
+// regardless of climate setpoint.
+//
+// manualOverride is only meaningful for the on path — it tells the car
+// "ignore auto-end heuristics, stay on until the operator says
+// otherwise." On the off path, manualOverride=true would mean "force
+// off and stay off" but on some firmware the car treats that
+// combination as ambiguous and silently keeps defrost running. Pass
+// false on off — auto behaviour will respect the explicit off and
+// shut down cleanly.
 func (s *TeslaService) SetDefrost(ctx context.Context, userID int64, on bool) error {
 	name := "defrost_off"
 	if on {
 		name = "defrost_on"
 	}
+	manualOverride := on
 	return s.runInfotainmentCommand(ctx, userID, name, true, func(car *vehicle.Vehicle) error {
-		return car.SetPreconditioningMax(ctx, on, true)
+		return car.SetPreconditioningMax(ctx, on, manualOverride)
 	})
 }
 

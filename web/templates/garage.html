@@ -122,7 +122,9 @@
                         <div class="stat-block">
                             <div class="stat-row">
                                 <span>Range</span>
-                                <strong><span x-text="Math.round(charge.battery_range_km || 0)"></span> km</strong>
+                                <!-- Tesla's BLE returns battery_range in MILES regardless of
+                                     the car's display unit setting. Convert to km here. -->
+                                <strong><span x-text="Math.round((charge.battery_range_km || 0) * 1.609344)"></span> km</strong>
                             </div>
                             <div class="stat-row">
                                 <span>Charge limit</span>
@@ -130,7 +132,7 @@
                                     <input type="range" min="50" max="100" step="5"
                                            x-model.number="chargeLimitDraft"
                                            @change="setChargeLimit($event.target.value)"
-                                           :disabled="busy"
+
                                            style="width:120px;">
                                     <strong style="min-width:48px; text-align:right;"
                                             x-text="chargeLimitDraft + '%'"></strong>
@@ -198,24 +200,41 @@
                             <strong><span x-text="formatTemp(climate.driver_temp_set_c)"></span> °C</strong>
                         </div>
                         <div class="form-row" style="margin-top:12px; gap:8px; flex-wrap:wrap;">
-                            <button class="btn" @click="cmd('climate-on')" :disabled="busy">Turn on</button>
-                            <button class="btn ghost" @click="cmd('climate-off')" :disabled="busy">Turn off</button>
+                            <button class="btn"
+                                    @click="optimisticToggle('climate-on',
+                                        () => climate.is_climate_on = true,
+                                        () => climate.is_climate_on = false)">
+                                Turn on
+                            </button>
+                            <button class="btn ghost"
+                                    @click="optimisticToggle('climate-off',
+                                        () => climate.is_climate_on = false,
+                                        () => climate.is_climate_on = true)">
+                                Turn off
+                            </button>
                             <button class="btn"
                                     :class="climate.is_preconditioning ? '' : 'ghost'"
-                                    @click="cmd(climate.is_preconditioning ? 'defrost-off' : 'defrost-on')"
-                                    :disabled="busy">
+                                    @click="optimisticToggle(
+                                        climate.is_preconditioning ? 'defrost-off' : 'defrost-on',
+                                        () => climate.is_preconditioning = !climate.is_preconditioning,
+                                        () => climate.is_preconditioning = !climate.is_preconditioning)">
                                 <span x-text="climate.is_preconditioning ? 'Defrost ON' : 'Defrost'"></span>
                             </button>
                             <button class="btn"
                                     :class="climate.cabin_overheat_protection ? '' : 'ghost'"
-                                    @click="cmd(climate.cabin_overheat_protection ? 'cabin-overheat-off' : 'cabin-overheat-on')"
-                                    :disabled="busy">
+                                    @click="optimisticToggle(
+                                        climate.cabin_overheat_protection ? 'cabin-overheat-off' : 'cabin-overheat-on',
+                                        () => climate.cabin_overheat_protection = !climate.cabin_overheat_protection,
+                                        () => climate.cabin_overheat_protection = !climate.cabin_overheat_protection)">
                                 <span x-text="climate.cabin_overheat_protection ? 'Cabin protect ON' : 'Cabin protect'"></span>
                             </button>
                             <button class="btn"
                                     :class="climate.steering_wheel_heater ? '' : 'ghost'"
-                                    @click="cmd(climate.steering_wheel_heater ? 'steering-wheel-heater-off' : 'steering-wheel-heater-on')"
-                                    :disabled="busy || !climate.is_climate_on"
+                                    @click="optimisticToggle(
+                                        climate.steering_wheel_heater ? 'steering-wheel-heater-off' : 'steering-wheel-heater-on',
+                                        () => climate.steering_wheel_heater = !climate.steering_wheel_heater,
+                                        () => climate.steering_wheel_heater = !climate.steering_wheel_heater)"
+                                    :disabled="!climate.is_climate_on"
                                     :title="climate.is_climate_on ? '' : 'Steering-wheel heat is tied to HVAC — turn climate on first, otherwise the toggle is a no-op on the car side.'">
                                 <span x-text="climate.steering_wheel_heater ? 'Wheel heat ON' : 'Wheel heat'"></span>
                             </button>
@@ -231,7 +250,7 @@
                                         <input type="range" min="0" max="3" step="1"
                                                :value="s.level"
                                                @change="setSeatHeater(s.position, $event.target.value)"
-                                               :disabled="busy"
+
                                                style="width:120px;">
                                         <strong style="min-width:48px; text-align:right;"
                                                 x-text="['off','low','med','high'][s.level]"></strong>
@@ -257,7 +276,7 @@
                                         <input type="range" min="0" max="3" step="1"
                                                :value="seatCoolerDrafts[pos]"
                                                @change="setSeatCooler(pos, $event.target.value)"
-                                               :disabled="busy"
+
                                                style="width:120px;">
                                         <strong style="min-width:48px; text-align:right;"
                                                 x-text="['off','low','med','high'][seatCoolerDrafts[pos]]"></strong>
@@ -277,30 +296,32 @@
                     </div>
                     <div class="card-body">
                         <div class="cmd-grid">
-                            <button class="btn" @click="cmd('lock')" :disabled="busy">Lock</button>
-                            <button class="btn" @click="cmd('unlock')" :disabled="busy">Unlock</button>
-                            <button class="btn" @click="cmd('flash-lights')" :disabled="busy">Flash lights</button>
-                            <button class="btn" @click="cmd('honk')" :disabled="busy">Honk</button>
-                            <button class="btn" @click="cmd('open-frunk')" :disabled="busy">Frunk</button>
-                            <button class="btn" @click="cmd('open-trunk')" :disabled="busy">Trunk</button>
+                            <button class="btn" @click="cmd('lock')">Lock</button>
+                            <button class="btn" @click="cmd('unlock')">Unlock</button>
+                            <button class="btn" @click="cmd('flash-lights')">Flash lights</button>
+                            <button class="btn" @click="cmd('honk')">Honk</button>
+                            <button class="btn" @click="cmd('open-frunk')">Frunk</button>
+                            <button class="btn" @click="cmd('open-trunk')">Trunk</button>
                             <button class="btn"
                                     @click="cmd(chargePortOpen ? 'close-charge-port' : 'open-charge-port')"
-                                    :disabled="busy"
+
                                     title="Toggles the charge port flap based on its current closure state.">
                                 <span x-text="chargePortOpen ? 'Close charge port' : 'Open charge port'"></span>
                             </button>
                             <button class="btn"
                                     @click="cmd('homelink')"
-                                    :disabled="busy"
+
                                     title="Triggers the Tesla's Homelink relay at the car's current GPS position. If you're parked at a stored Homelink (your garage, gate, etc.), the matching one fires.">
                                 Open garage
                             </button>
-                            <button class="btn" @click="cmd('vent-windows')" :disabled="busy">Vent windows</button>
-                            <button class="btn" @click="cmd('close-windows')" :disabled="busy">Close windows</button>
+                            <button class="btn" @click="cmd('vent-windows')">Vent windows</button>
+                            <button class="btn" @click="cmd('close-windows')">Close windows</button>
                             <button class="btn"
                                     :class="((vcsec || {}).closures || {}).sentry_on ? '' : 'ghost'"
-                                    @click="cmd(((vcsec || {}).closures || {}).sentry_on ? 'sentry-off' : 'sentry-on')"
-                                    :disabled="busy">
+                                    @click="optimisticToggle(
+                                        ((vcsec || {}).closures || {}).sentry_on ? 'sentry-off' : 'sentry-on',
+                                        () => { vcsec.closures = vcsec.closures || {}; vcsec.closures.sentry_on = !vcsec.closures.sentry_on; },
+                                        () => { vcsec.closures.sentry_on = !vcsec.closures.sentry_on; })">
                                 <span x-text="((vcsec || {}).closures || {}).sentry_on ? 'Sentry ON' : 'Sentry'"></span>
                             </button>
                             <!-- Keep-accessory-power can't be read back from the car
@@ -309,17 +330,17 @@
                                  button isn't lying about a state it doesn't actually know. -->
                             <button class="btn ghost"
                                     @click="cmd('keep-accessory-power-on')"
-                                    :disabled="busy"
+
                                     title="Keep cabin powered after Park. Drains ~1%/h. Tesla doesn't report this state back, so the button can only fire one direction.">
                                 KAP on
                             </button>
                             <button class="btn ghost"
                                     @click="cmd('keep-accessory-power-off')"
-                                    :disabled="busy"
+
                                     title="Disable keep-accessory-power.">
                                 KAP off
                             </button>
-                            <button class="btn ghost" @click="cmd('wake')" :disabled="busy">Wake</button>
+                            <button class="btn ghost" @click="cmd('wake')">Wake</button>
                         </div>
                     </div>
                 </div>
@@ -572,8 +593,14 @@ function garageApp() {
         },
 
         // ── state refresh ──────────────────────────────────────
+        //
+        // busy=true only when the operator triggered the refresh
+        // manually (clicked the top-right Refresh button, which passes
+        // 'full' / 'bcs'). Background polls (mode='') stay invisible
+        // — no UI lockup while we silently re-poll after a command.
         async refresh(mode) {
-            this.busy = mode !== '';
+            const manual = mode === 'full' || mode === 'bcs';
+            if (manual) this.busy = true;
             try {
                 const q = mode ? '?refresh=' + mode : '';
                 const r = await api.get('/api/tesla/state' + q);
@@ -596,21 +623,27 @@ function garageApp() {
                 }
                 if (r && r.error) notify(r.error, 'warn');
             } catch (e) { /* keep last good snapshot */ }
-            this.busy = false;
+            if (manual) this.busy = false;
         },
 
         // ── commands ───────────────────────────────────────────
+        //
+        // cmd() is the fire-and-forget path for non-toggle actions
+        // (lock / unlock / wake / honk / flash / frunk / trunk / charge
+        // port / homelink / vent-windows / close-windows / KAP on / KAP
+        // off). It NO LONGER blocks the UI: clicks dispatch immediately
+        // and the post happens in the background. The 30s background
+        // BCS poll plus our optional post-command refresh keep the
+        // visible state honest.
+        //
+        // For toggle-style buttons (sentry / COP / defrost / wheel heat
+        // / climate on/off / charging start/stop) use optimisticToggle
+        // instead — it flips the local state immediately so the button
+        // reflects the user's intent without waiting for a round-trip.
         async cmd(name) {
-            this.busy = true;
             try {
                 await api.post('/api/tesla/commands/' + name, {});
                 notify(name.replace(/-/g, ' ') + ' ✓', 'success');
-                // Most commands change state outside VCSEC's body-controller
-                // view — charge port / climate / sentry / cabin / defrost /
-                // heater levels all live in Infotainment domain. We re-poll
-                // the FULL state (which wakes infotainment if asleep) for
-                // any command that touches one of those. Lock/unlock/wake/
-                // honk/flash/frunk/trunk/homelink stay on cheap BCS-only.
                 const fullRefreshHints = [
                     'charge-port', 'climate', 'charging', 'sentry',
                     'cabin-overheat', 'defrost', 'heater', 'window',
@@ -620,8 +653,33 @@ function garageApp() {
                 this.loadLog();
             } catch (e) {
                 notify(e.message || (name + ' failed'), 'danger');
-            } finally {
-                this.busy = false;
+            }
+        },
+
+        // optimisticToggle flips a local state field immediately, fires
+        // the command in the background, and reverts on failure. The
+        // caller passes:
+        //   - commandName: the path segment for /api/tesla/commands/<name>
+        //   - apply():    a closure that performs the optimistic update
+        //                 on the local snapshot
+        //   - revert():   a closure that undoes apply() on error
+        //   - refreshKind ('full' by default): which refresh to schedule
+        //                 1.5s after the command, so the eventual real
+        //                 state replaces the optimistic value.
+        //
+        // No busy=true here — controls stay live. The bleMu in the
+        // service serialises overlapping commands; the UI doesn't
+        // need to mirror that lock.
+        async optimisticToggle(commandName, apply, revert, refreshKind) {
+            apply();
+            try {
+                await api.post('/api/tesla/commands/' + commandName, {});
+                notify(commandName.replace(/-/g, ' ') + ' ✓', 'success');
+                setTimeout(() => this.refresh(refreshKind || 'full'), 1500);
+                this.loadLog();
+            } catch (e) {
+                revert();
+                notify(e.message || (commandName + ' failed'), 'danger');
             }
         },
 
@@ -630,12 +688,13 @@ function garageApp() {
             catch (e) {}
         },
 
-        // setChargeLimit fires when the slider releases (input @change).
-        // Posts to /api/tesla/commands/set-charging-limit with {percent}.
-        // After the SDK confirms, we trigger a full refresh so the next
-        // ChargeState read shows the new limit.
+        // setChargeLimit, setSeatHeater, setSeatCooler — slider-driven
+        // commands. The slider's visible position IS the optimistic
+        // state, so we don't need a separate apply/revert. We do NOT
+        // set busy=true: blocking the UI on every slider change makes
+        // it feel laggy. The bleMu in the service serialises overlapping
+        // dispatches automatically.
         async setChargeLimit(percent) {
-            this.busy = true;
             try {
                 await api.post('/api/tesla/commands/set-charging-limit', { percent: Number(percent) });
                 notify('charge limit → ' + percent + '%', 'success');
@@ -643,14 +702,10 @@ function garageApp() {
                 this.loadLog();
             } catch (e) {
                 notify(e.message || 'set charge limit failed', 'danger');
-            } finally {
-                this.busy = false;
             }
         },
 
-        // setSeatHeater fires when a per-seat slider changes.
         async setSeatHeater(position, level) {
-            this.busy = true;
             try {
                 await api.post('/api/tesla/commands/set-seat-heater', {
                     position: position, level: Number(level)
@@ -660,16 +715,12 @@ function garageApp() {
                 this.loadLog();
             } catch (e) {
                 notify(e.message || 'seat heater failed', 'danger');
-            } finally {
-                this.busy = false;
             }
         },
 
         // setSeatCooler — front seats only. Tesla doesn't echo level
-        // back via state, so we stash the local draft on the controller
-        // and don't try to round-trip it.
+        // back, so the slider stays where the operator left it.
         async setSeatCooler(position, level) {
-            this.busy = true;
             this.seatCoolerDrafts[position] = Number(level);
             try {
                 await api.post('/api/tesla/commands/set-seat-cooler', {
@@ -679,8 +730,6 @@ function garageApp() {
                 this.loadLog();
             } catch (e) {
                 notify(e.message || 'seat cooler failed', 'danger');
-            } finally {
-                this.busy = false;
             }
         },
 
