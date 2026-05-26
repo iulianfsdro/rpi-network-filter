@@ -419,8 +419,18 @@ function garageApp() {
             try {
                 await api.post('/api/tesla/commands/' + name, {});
                 notify(name.replace(/-/g, ' ') + ' ✓', 'success');
-                // re-poll cheap state after a command so the UI catches up
-                setTimeout(() => this.refresh('bcs'), 1500);
+                // VCSEC's charge-port closure sensor lags real life, so
+                // for charge-port commands re-poll the Infotainment
+                // ChargeState too — it reports charge_port_door_open
+                // accurately. Other commands stick with the cheap BCS
+                // re-poll.
+                const needsFull = name === 'open-charge-port' ||
+                                  name === 'close-charge-port' ||
+                                  name === 'climate-on' ||
+                                  name === 'climate-off' ||
+                                  name === 'start-charging' ||
+                                  name === 'stop-charging';
+                setTimeout(() => this.refresh(needsFull ? 'full' : 'bcs'), 1500);
                 this.loadLog();
             } catch (e) {
                 notify(e.message || (name + ' failed'), 'danger');
@@ -457,15 +467,24 @@ function garageApp() {
             if (s === 'no_power' || s === 'stopped')  return 'danger';
             return 'muted';
         },
-        // chargePortOpen reads the cached VCSEC closure state. Snapshot
-        // is updated every 30s by the background poller, plus after each
-        // command (we re-poll BCS 1.5s post-action). Falls back to false
-        // when state is "unknown" so a brand-new install defaults to
-        // "Open charge port" rather than the more dangerous-feeling
-        // "Close charge port".
+        // chargePortOpen prefers the Infotainment view (charge_port_open
+        // bool, sourced from the ChargeState subsystem) over VCSEC's
+        // closure string. Reason: Tesla's VCSEC closure sensor for the
+        // charge port lags real-world state by minutes sometimes — we've
+        // seen it report "open" persistently after a clean close. The
+        // Infotainment ChargeState reflects the flap's actual position.
+        //
+        // Fall through to VCSEC only if charge data has never been
+        // polled (chargeFreshnessMs == null), which is the cold-start
+        // case before the user opens /garage and triggers a full
+        // refresh. Final fallback to false so the button defaults to
+        // the less-surprising "Open charge port" label.
         get chargePortOpen() {
+            if (this.chargeFreshnessMs != null && this.charge && typeof this.charge.charge_port_open === 'boolean') {
+                return this.charge.charge_port_open;
+            }
             const s = ((this.vcsec || {}).closures || {}).charge_port;
-            return s && s !== 'closed' && s !== 'unknown';
+            return !!(s && s !== 'closed' && s !== 'unknown');
         },
         get lockBadgeClass() {
             const s = (this.vcsec.lock_state || '').toLowerCase();
@@ -485,8 +504,17 @@ function garageApp() {
                 ['charge_port',          'Charge port'],
             ];
             return items.map(([key, label]) => {
-                const state = c[key] || 'unknown';
-                return { key, label, state, open: state !== 'closed' && state !== 'unknown' };
+                let state = c[key] || 'unknown';
+                let open  = state !== 'closed' && state !== 'unknown';
+                // Charge port specifically: VCSEC sensor lags reality;
+                // the Infotainment ChargeState's charge_port_door_open
+                // bool is closer to the truth. Use it when fresh.
+                if (key === 'charge_port' && this.chargeFreshnessMs != null
+                        && this.charge && typeof this.charge.charge_port_open === 'boolean') {
+                    open  = this.charge.charge_port_open;
+                    state = open ? 'open' : 'closed';
+                }
+                return { key, label, state, open };
             });
         },
         formatTemp(c) { return (c == null || isNaN(c)) ? '—' : c.toFixed(1); },
