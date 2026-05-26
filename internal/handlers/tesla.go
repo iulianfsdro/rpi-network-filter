@@ -322,10 +322,6 @@ func (h *TeslaHandler) Command(w http.ResponseWriter, r *http.Request) {
 		err = h.tesla.ChargeMaxRange(ctx, userID)
 	case "charge-standard-range":
 		err = h.tesla.ChargeStandardRange(ctx, userID)
-	case "guest-mode-on":
-		err = h.tesla.SetGuestMode(ctx, userID, true)
-	case "guest-mode-off":
-		err = h.tesla.SetGuestMode(ctx, userID, false)
 	case "remote-drive":
 		err = h.tesla.RemoteDrive(ctx, userID)
 	case "set-climate-keeper-mode":

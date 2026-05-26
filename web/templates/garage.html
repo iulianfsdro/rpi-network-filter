@@ -536,16 +536,11 @@
                 <div class="card-head">
                     <div>
                         <div class="card-head-title">Security &amp; access</div>
-                        <div class="card-head-sub">Guest mode · Remote drive · Valet · Speed limit (PIN-gated)</div>
+                        <div class="card-head-sub">Remote drive · Valet · Speed limit (PIN-gated)</div>
                     </div>
                 </div>
                 <div class="card-body">
                     <div class="form-row" style="gap:8px; flex-wrap:wrap;">
-                        <button class="btn ghost" @click="cmd('guest-mode-on')"
-                                title="Allows other drivers to use the car without your saved settings or accounts.">
-                            Guest mode ON
-                        </button>
-                        <button class="btn ghost" @click="cmd('guest-mode-off')">Guest mode OFF</button>
                         <button class="btn ghost" @click="cmd('remote-drive')"
                                 title="Tesla's remote-drive primer — sits in for the key for ~2 minutes. The car needs you in the driver's seat to actually move.">
                             Remote drive
@@ -897,7 +892,7 @@ function garageApp() {
                 const fullRefreshHints = [
                     'charge', 'climate', 'sentry',
                     'cabin-overheat', 'defrost', 'heater', 'window',
-                    'valet', 'speed-limit', 'guest',
+                    'valet', 'speed-limit',
                 ];
                 const needsFull = fullRefreshHints.some(h => name.includes(h));
                 setTimeout(() => this.refresh(needsFull ? 'full' : 'bcs'), 1500);

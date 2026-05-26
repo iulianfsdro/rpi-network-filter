@@ -1021,17 +1021,7 @@ func (s *TeslaService) ChargeStandardRange(ctx context.Context, userID int64) er
 	})
 }
 
-// ─── V4.3: guest / drive / climate-keeper ────────────────────────
-
-func (s *TeslaService) SetGuestMode(ctx context.Context, userID int64, on bool) error {
-	name := "guest_mode_off"
-	if on {
-		name = "guest_mode_on"
-	}
-	return s.runInfotainmentCommand(ctx, userID, name, true, func(car *vehicle.Vehicle) error {
-		return car.SetGuestMode(ctx, on)
-	})
-}
+// ─── V4.3: drive / climate-keeper ────────────────────────
 
 // RemoteDrive is Tesla's "remote start" — primes the drive system
 // so the operator can leave Park without the key. Acts as a key for
