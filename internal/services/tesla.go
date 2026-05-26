@@ -1127,6 +1127,97 @@ func (s *TeslaService) SetSpeedLimitMPH(ctx context.Context, userID int64, mph f
 	})
 }
 
+// ─── V4.3 Phase 3: navigation + boombox (custom-fork actions) ────────
+//
+// These commands aren't in upstream vehicle-command but live on our
+// fork (github.com/ivan-prodanov/vehicle-command, branch
+// feat/v4.3-nav-boombox). The proto messages and field numbers
+// matched the python-tesla-fleet-api descriptor — same wire shape
+// production cars accept.
+
+// NavigateGPS sends a destination by lat/lon. order semantics:
+//   0 = REPLACE (clear existing route + set fresh)  ← default for /garage
+//   1 = PREPEND (add before current first stop)
+//   2 = APPEND  (add at end of current route)
+func (s *TeslaService) NavigateGPS(ctx context.Context, userID int64, lat, lon float64, order int) error {
+	o := remoteNavOrderFromInt(order)
+	return s.runInfotainmentCommand(ctx, userID, fmt.Sprintf("navigate_gps:%.5f,%.5f", lat, lon), true, func(car *vehicle.Vehicle) error {
+		return car.NavigationGpsRequest(ctx, lat, lon, o)
+	})
+}
+
+// NavigateGPSWithLabel is NavigateGPS plus the on-screen LABEL the car
+// shows in its nav UI ("Home", "Office", whatever the operator wants).
+// Coordinates still drive the routing; the label is cosmetic.
+func (s *TeslaService) NavigateGPSWithLabel(ctx context.Context, userID int64, lat, lon float64, label string, order int) error {
+	o := remoteNavOrderFromIntDest(order)
+	return s.runInfotainmentCommand(ctx, userID, fmt.Sprintf("navigate_gps_labeled:%.5f,%.5f", lat, lon), true, func(car *vehicle.Vehicle) error {
+		return car.NavigationGpsDestinationRequest(ctx, lat, lon, label, o)
+	})
+}
+
+// NavigateSearch sends a free-text destination string. The car
+// geocodes locally / via Tesla's cloud. Less precise than the GPS
+// variants — useful when the operator only has a place name.
+func (s *TeslaService) NavigateSearch(ctx context.Context, userID int64, query string, order int) error {
+	return s.runInfotainmentCommand(ctx, userID, "navigate_search", true, func(car *vehicle.Vehicle) error {
+		return car.NavigationRequest(ctx, query, int32(order))
+	})
+}
+
+// NavigateWaypoints sends a multi-stop trip plan. waypoints is a
+// comma-separated Google-Place-ID string per Tesla's wire format.
+// Painful to type by hand; we expose it because PR #443 confirmed it
+// works on production cars, leaving the door open for a future
+// /garage integration that hands operators a Place-ID lookup.
+func (s *TeslaService) NavigateWaypoints(ctx context.Context, userID int64, waypoints string) error {
+	return s.runInfotainmentCommand(ctx, userID, "navigate_waypoints", true, func(car *vehicle.Vehicle) error {
+		return car.NavigationWaypointsRequest(ctx, waypoints, nil)
+	})
+}
+
+// RemoteBoombox plays one of the car's external-speaker sounds. The
+// `sound` int is Tesla's opaque enum — exact values shift between
+// firmware versions, so we pass through what the operator picks.
+func (s *TeslaService) RemoteBoombox(ctx context.Context, userID int64, sound int) error {
+	if sound < 0 || sound > 65535 {
+		return fmt.Errorf("boombox sound out of uint16 range (0-65535)")
+	}
+	return s.runInfotainmentCommand(ctx, userID, fmt.Sprintf("boombox:%d", sound), true, func(car *vehicle.Vehicle) error {
+		return car.RemoteBoombox(ctx, uint32(sound))
+	})
+}
+
+// remoteNavOrderFromInt / *Dest map our integer arg to the SDK's enum.
+// The two functions exist because protoc generated DIFFERENT enum
+// types for the two requests even though their values match — they
+// share message families.
+func remoteNavOrderFromInt(i int) carserver.NavigationGpsRequest_RemoteNavTripOrder {
+	switch i {
+	case 1:
+		return carserver.NavigationGpsRequest_REMOTE_NAV_TRIP_ORDER_REPLACE
+	case 2:
+		return carserver.NavigationGpsRequest_REMOTE_NAV_TRIP_ORDER_PREPEND
+	case 3:
+		return carserver.NavigationGpsRequest_REMOTE_NAV_TRIP_ORDER_APPEND
+	default:
+		return carserver.NavigationGpsRequest_REMOTE_NAV_TRIP_ORDER_REPLACE
+	}
+}
+
+func remoteNavOrderFromIntDest(i int) carserver.NavigationGpsDestinationRequest_RemoteNavTripOrder {
+	switch i {
+	case 1:
+		return carserver.NavigationGpsDestinationRequest_REMOTE_NAV_TRIP_ORDER_REPLACE
+	case 2:
+		return carserver.NavigationGpsDestinationRequest_REMOTE_NAV_TRIP_ORDER_PREPEND
+	case 3:
+		return carserver.NavigationGpsDestinationRequest_REMOTE_NAV_TRIP_ORDER_APPEND
+	default:
+		return carserver.NavigationGpsDestinationRequest_REMOTE_NAV_TRIP_ORDER_REPLACE
+	}
+}
+
 // validateTeslaPIN constrains to 4 numeric digits, matching Tesla's
 // own onboarding constraint.
 func validateTeslaPIN(pin string) error {

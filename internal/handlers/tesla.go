@@ -384,6 +384,52 @@ func (h *TeslaHandler) Command(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		err = h.tesla.SetSpeedLimitMPH(ctx, userID, body.MPH)
+
+	// ─── V4.3 Phase 3: navigation + boombox (fork-only commands) ──
+	case "navigate-gps":
+		var body struct {
+			Lat   float64 `json:"lat"`
+			Lon   float64 `json:"lon"`
+			Order int     `json:"order"`
+			Label string  `json:"label"` // optional: switches to NavigateGPSWithLabel
+		}
+		if derr := decodeJSON(r, &body); derr != nil {
+			JSONError(w, http.StatusBadRequest, derr.Error())
+			return
+		}
+		if body.Label != "" {
+			err = h.tesla.NavigateGPSWithLabel(ctx, userID, body.Lat, body.Lon, body.Label, body.Order)
+		} else {
+			err = h.tesla.NavigateGPS(ctx, userID, body.Lat, body.Lon, body.Order)
+		}
+	case "navigate-search":
+		var body struct {
+			Query string `json:"query"`
+			Order int    `json:"order"`
+		}
+		if derr := decodeJSON(r, &body); derr != nil {
+			JSONError(w, http.StatusBadRequest, derr.Error())
+			return
+		}
+		err = h.tesla.NavigateSearch(ctx, userID, body.Query, body.Order)
+	case "navigate-waypoints":
+		var body struct {
+			Waypoints string `json:"waypoints"`
+		}
+		if derr := decodeJSON(r, &body); derr != nil {
+			JSONError(w, http.StatusBadRequest, derr.Error())
+			return
+		}
+		err = h.tesla.NavigateWaypoints(ctx, userID, body.Waypoints)
+	case "boombox":
+		var body struct {
+			Sound int `json:"sound"`
+		}
+		if derr := decodeJSON(r, &body); derr != nil {
+			JSONError(w, http.StatusBadRequest, derr.Error())
+			return
+		}
+		err = h.tesla.RemoteBoombox(ctx, userID, body.Sound)
 	default:
 		JSONError(w, http.StatusNotFound, "unknown command")
 		return

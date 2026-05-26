@@ -468,6 +468,69 @@
                 </div>
             </div>
 
+            <!-- ── Navigation + boombox (V4.3 fork commands) ─────── -->
+            <div class="grid-2">
+                <div class="card">
+                    <div class="card-head">
+                        <div>
+                            <div class="card-head-title">Send navigation</div>
+                            <div class="card-head-sub">lat / lon → car's nav screen · over BLE, no Tesla cloud</div>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <p style="color:var(--muted); font-size:13px; margin-bottom:12px;">
+                            Coordinates go directly to the car. Optional label is what the on-screen
+                            destination card reads ("Home", "Office"). Auto-fills from the Location
+                            card via the button below.
+                        </p>
+                        <div class="form-row" style="gap:8px; flex-wrap:wrap; margin-bottom:8px;">
+                            <input type="number" step="0.000001" class="input mono"
+                                   x-model.number="navLat" placeholder="latitude" style="width:140px;">
+                            <input type="number" step="0.000001" class="input mono"
+                                   x-model.number="navLon" placeholder="longitude" style="width:140px;">
+                        </div>
+                        <div class="form-row" style="gap:8px; flex-wrap:wrap; margin-bottom:12px;">
+                            <input type="text" class="input"
+                                   x-model="navLabel" placeholder="label (optional)" style="flex:1; min-width:160px;">
+                        </div>
+                        <div class="form-row" style="gap:8px; flex-wrap:wrap;">
+                            <button class="btn" :disabled="!navLat || !navLon"
+                                    @click="cmdJSON('navigate-gps', { lat: Number(navLat), lon: Number(navLon), order: 0, label: navLabel || '' })">
+                                Send to car
+                            </button>
+                            <button class="btn ghost" :disabled="!hasLocation"
+                                    @click="navLat = location.latitude; navLon = location.longitude;"
+                                    title="Paste the car's current GPS into the inputs above.">
+                                Use car position
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-head">
+                        <div>
+                            <div class="card-head-title">Boombox</div>
+                            <div class="card-head-sub">Tesla's external-speaker sounds · hold a passing pedestrian's ear</div>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <p style="color:var(--muted); font-size:13px; margin-bottom:12px;">
+                            Plays one of the car's stored sounds through the external pedestrian-warning
+                            speaker. The sound IDs aren't publicly documented and shift between firmware
+                            versions — try a few. The "fart" tradition starts at 0.
+                        </p>
+                        <div class="form-row" style="gap:8px; flex-wrap:wrap;">
+                            <template x-for="s in [0,1,2,3,4,5,6,7,8]" :key="s">
+                                <button class="btn ghost"
+                                        @click="cmdJSON('boombox', { sound: s })"
+                                        x-text="'Sound ' + s"></button>
+                            </template>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
             <!-- ── Security & access (V4.3) ──────────────────────── -->
             <div class="card">
                 <div class="card-head">

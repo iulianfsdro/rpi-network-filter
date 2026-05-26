@@ -3,6 +3,7 @@ module github.com/iulianfsdro/rpi-network-filter
 go 1.23
 
 require (
+	github.com/go-ble/ble v0.0.0-20240122180141-8c5522f54333
 	github.com/go-chi/chi/v5 v5.1.0
 	github.com/teslamotors/vehicle-command v0.4.1
 	golang.org/x/crypto v0.21.0
@@ -14,7 +15,6 @@ require (
 	github.com/JuulLabs-OSS/cbgo v0.0.1 // indirect
 	github.com/cronokirby/saferith v0.33.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
-	github.com/go-ble/ble v0.0.0-20240122180141-8c5522f54333 // indirect
 	github.com/golang-jwt/jwt/v5 v5.2.2 // indirect
 	github.com/google/uuid v1.3.0 // indirect
 	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
@@ -37,3 +37,5 @@ require (
 	modernc.org/strutil v1.2.0 // indirect
 	modernc.org/token v1.1.0 // indirect
 )
+
+replace github.com/teslamotors/vehicle-command => github.com/ivan-prodanov/vehicle-command v0.4.2-0.20260526184107-601c75adb598
