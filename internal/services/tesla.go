@@ -138,10 +138,25 @@ type VehicleSnapshot struct {
 	OutsideTempC     float32
 	DriverTempSetC   float32
 	IsClimateOn      bool
+	IsPreconditioning bool // defrost / "Get out of car cleanly" mode
 	FanStatus        int32
 	SeatHeaterLeft   int32
 	SeatHeaterRight  int32
+	SeatHeaterRearLeft   int32
+	SeatHeaterRearCenter int32
+	SeatHeaterRearRight  int32
+	SteeringWheelHeater  bool
+	FrontDefrosterOn     bool
+	RearDefrosterOn      bool
+	CabinOverheatProtection bool // operator-level COP toggle
 	ClimateFreshness time.Duration
+
+	// Extended state — populated by full-state polls.
+	TirePressure       TirePressureSnapshot
+	TPFreshness        time.Duration
+
+	Location           LocationSnapshot
+	LocationFreshness  time.Duration
 }
 
 // ClosuresSnapshot is the per-aperture state in plain strings (not the
@@ -155,6 +170,41 @@ type ClosuresSnapshot struct {
 	RearTrunk          string
 	ChargePort         string
 	Tonneau            string
+
+	// Windows arrive from the CarServer ClosuresState (NOT VCSEC, which
+	// only knows doors + trunks + frunk + charge-port + tonneau). They
+	// stay zero/false until a full state poll runs.
+	WindowDriverFront    bool
+	WindowPassengerFront bool
+	WindowDriverRear     bool
+	WindowPassengerRear  bool
+
+	// Sentry mode lives on CarServer ClosuresState too.
+	SentryAvailable bool
+	SentryOn        bool
+}
+
+// TirePressureSnapshot holds the four wheels' pressures in bar (Tesla
+// reports kPa internally but the SDK normalises to bar). Zero means
+// "no reading received yet" — TPMS only refreshes when the car is
+// moving or after a state poll wakes it.
+type TirePressureSnapshot struct {
+	FrontLeftBar  float32
+	FrontRightBar float32
+	RearLeftBar   float32
+	RearRightBar  float32
+
+	HardWarningFrontLeft  bool
+	HardWarningFrontRight bool
+	HardWarningRearLeft   bool
+	HardWarningRearRight  bool
+}
+
+// LocationSnapshot is the car's last-known position. Both fields can
+// be zero when the GPS hasn't fixed yet (cold start, indoor parking).
+type LocationSnapshot struct {
+	Latitude  float32
+	Longitude float32
 }
 
 // TeslaService is the singleton wrapping every BLE operation. Held by
@@ -174,9 +224,11 @@ type TeslaService struct {
 	// because the snapshot is read-heavy (every page refresh).
 	stateMu sync.RWMutex
 	snap    VehicleSnapshot
-	lastBCSAt     time.Time
-	lastChargeAt  time.Time
-	lastClimateAt time.Time
+	lastBCSAt      time.Time
+	lastChargeAt   time.Time
+	lastClimateAt  time.Time
+	lastTPAt       time.Time
+	lastLocationAt time.Time
 
 	// Lifecycle.
 	pollerCtx    context.Context
@@ -433,35 +485,65 @@ func (s *TeslaService) PollBodyControllerState(ctx context.Context) error {
 	return nil
 }
 
-// PollChargeAndClimate refreshes battery + climate state. Requires the
-// infotainment to be awake; we wake-and-wait if it isn't. Use sparingly
-// — keeping the infotainment up draws 12V battery.
+// PollChargeAndClimate refreshes the full Infotainment-domain state —
+// charge, climate, closures (windows + sentry), location, tire
+// pressure. Despite the legacy name, it's the "full" state-refresh
+// path. Requires the infotainment to be awake; we wake-and-wait if it
+// isn't. Use sparingly — keeping the infotainment up draws 12V battery.
+//
+// Each subsystem is fetched independently and best-effort: if one
+// fails we log + continue rather than abandoning the others, because
+// (a) the charge read is the most-valuable single fetch, and (b) some
+// vehicles don't ship every subsystem (older Model S without TPMS,
+// etc.).
 func (s *TeslaService) PollChargeAndClimate(ctx context.Context, wake bool) error {
 	vin, err := s.requireVIN()
 	if err != nil {
 		return err
 	}
 	return s.withInfotainment(ctx, vin, wake, func(car *vehicle.Vehicle) error {
-		chargeCtx, cancel := context.WithTimeout(ctx, teslaCommandTimeout)
-		defer cancel()
-		chargeData, err := car.GetState(chargeCtx, vehicle.StateCategoryCharge)
-		if err != nil {
+		// charge — the headline number for /garage
+		if data, err := getStateWithTimeout(ctx, car, vehicle.StateCategoryCharge); err == nil {
+			s.updateCharge(data.GetChargeState())
+		} else {
 			return fmt.Errorf("GetState(charge): %w", err)
 		}
-		s.updateCharge(chargeData.GetChargeState())
-
-		climateCtx, cancel2 := context.WithTimeout(ctx, teslaCommandTimeout)
-		defer cancel2()
-		climateData, err := car.GetState(climateCtx, vehicle.StateCategoryClimate)
-		if err != nil {
-			// Don't fail the whole call if just climate refuses;
-			// charge data is the more valuable read.
+		// climate — best-effort
+		if data, err := getStateWithTimeout(ctx, car, vehicle.StateCategoryClimate); err == nil {
+			s.updateClimate(data.GetClimateState())
+		} else {
 			log.Printf("[TESLA] GetState(climate) failed (charge succeeded): %v", err)
-			return nil
 		}
-		s.updateClimate(climateData.GetClimateState())
+		// closures (CarServer view — has windows + sentry mode, richer
+		// than VCSEC's set)
+		if data, err := getStateWithTimeout(ctx, car, vehicle.StateCategoryClosures); err == nil {
+			s.updateClosures(data.GetClosuresState())
+		} else {
+			log.Printf("[TESLA] GetState(closures) failed: %v", err)
+		}
+		// tire pressure
+		if data, err := getStateWithTimeout(ctx, car, vehicle.StateCategoryTirePressure); err == nil {
+			s.updateTirePressure(data.GetTirePressureState())
+		} else {
+			log.Printf("[TESLA] GetState(tire-pressure) failed: %v", err)
+		}
+		// location
+		if data, err := getStateWithTimeout(ctx, car, vehicle.StateCategoryLocation); err == nil {
+			s.updateLocation(data.GetLocationState())
+		} else {
+			log.Printf("[TESLA] GetState(location) failed: %v", err)
+		}
 		return nil
 	})
+}
+
+// getStateWithTimeout wraps car.GetState with the standard per-call
+// timeout. Defined here rather than inline to keep PollChargeAndClimate
+// readable.
+func getStateWithTimeout(parent context.Context, car *vehicle.Vehicle, cat vehicle.StateCategory) (*carserver.VehicleData, error) {
+	ctx, cancel := context.WithTimeout(parent, teslaCommandTimeout)
+	defer cancel()
+	return car.GetState(ctx, cat)
 }
 
 // Snapshot returns the cached state. Cheap; safe to call from every
@@ -482,6 +564,12 @@ func (s *TeslaService) Snapshot() VehicleSnapshot {
 	}
 	if !s.lastClimateAt.IsZero() {
 		out.ClimateFreshness = now.Sub(s.lastClimateAt)
+	}
+	if !s.lastTPAt.IsZero() {
+		out.TPFreshness = now.Sub(s.lastTPAt)
+	}
+	if !s.lastLocationAt.IsZero() {
+		out.LocationFreshness = now.Sub(s.lastLocationAt)
 	}
 	return out
 }
@@ -595,6 +683,106 @@ func (s *TeslaService) StartCharging(ctx context.Context, userID int64) error {
 func (s *TeslaService) StopCharging(ctx context.Context, userID int64) error {
 	return s.runInfotainmentCommand(ctx, userID, "stop_charging", true, func(car *vehicle.Vehicle) error {
 		return car.ChargeStop(ctx)
+	})
+}
+
+func (s *TeslaService) VentWindows(ctx context.Context, userID int64) error {
+	return s.runInfotainmentCommand(ctx, userID, "vent_windows", true, func(car *vehicle.Vehicle) error {
+		return car.VentWindows(ctx)
+	})
+}
+
+func (s *TeslaService) CloseWindows(ctx context.Context, userID int64) error {
+	return s.runInfotainmentCommand(ctx, userID, "close_windows", true, func(car *vehicle.Vehicle) error {
+		return car.CloseWindows(ctx)
+	})
+}
+
+// SetDefrost toggles "preconditioning max" — Tesla's defrost mode that
+// fires the front/rear defrosters + seat heaters + cabin heater hard
+// regardless of climate setpoint. manualOverride=false lets the car
+// auto-end when conditions are clear; we pass true so the operator's
+// intent (typically "I'm getting in soon, melt the ice") sticks until
+// they turn it off.
+func (s *TeslaService) SetDefrost(ctx context.Context, userID int64, on bool) error {
+	name := "defrost_off"
+	if on {
+		name = "defrost_on"
+	}
+	return s.runInfotainmentCommand(ctx, userID, name, true, func(car *vehicle.Vehicle) error {
+		return car.SetPreconditioningMax(ctx, on, true)
+	})
+}
+
+// SetCabinOverheatProtection toggles the summer-parking feature that
+// keeps the cabin from cooking on hot days. fanOnly=false uses the AC
+// compressor (faster, more power); fanOnly=true just runs the fan
+// (gentler on the 12V battery). We expose only the on/off semantics
+// and pick fanOnly=false to match Tesla's default behaviour.
+func (s *TeslaService) SetCabinOverheatProtection(ctx context.Context, userID int64, on bool) error {
+	name := "cabin_overheat_off"
+	if on {
+		name = "cabin_overheat_on"
+	}
+	return s.runInfotainmentCommand(ctx, userID, name, true, func(car *vehicle.Vehicle) error {
+		return car.SetCabinOverheatProtection(ctx, on, false)
+	})
+}
+
+// SetKeepAccessoryPower toggles "keep cabin powered after Park."
+// Useful for camp mode + accessory-power use cases. Costs ~1% / hour
+// of 12V drain when on; the car warns the operator about that on its
+// own UI.
+func (s *TeslaService) SetKeepAccessoryPower(ctx context.Context, userID int64, on bool) error {
+	name := "keep_accessory_power_off"
+	if on {
+		name = "keep_accessory_power_on"
+	}
+	return s.runInfotainmentCommand(ctx, userID, name, true, func(car *vehicle.Vehicle) error {
+		return car.SetKeepAccessoryPowerMode(ctx, on)
+	})
+}
+
+// SetSeatHeater configures one seat's heater level. position is one of
+// "front-left" / "front-right" / "rear-left" / "rear-center" /
+// "rear-right" (we constrain to those — Model S has back-rest variants
+// the SDK supports but they're niche). level is 0 (off) … 3 (high).
+func (s *TeslaService) SetSeatHeater(ctx context.Context, userID int64, position string, level int) error {
+	seat, ok := seatPositionFromString(position)
+	if !ok {
+		return fmt.Errorf("invalid seat position %q", position)
+	}
+	if level < 0 || level > 3 {
+		return fmt.Errorf("seat heater level %d out of range (0-3)", level)
+	}
+	name := fmt.Sprintf("seat_heater:%s=%d", position, level)
+	return s.runInfotainmentCommand(ctx, userID, name, true, func(car *vehicle.Vehicle) error {
+		return car.SetSeatHeater(ctx, map[vehicle.SeatPosition]vehicle.Level{seat: vehicle.Level(level)})
+	})
+}
+
+func seatPositionFromString(s string) (vehicle.SeatPosition, bool) {
+	switch s {
+	case "front-left":
+		return vehicle.SeatFrontLeft, true
+	case "front-right":
+		return vehicle.SeatFrontRight, true
+	case "rear-left":
+		return vehicle.SeatSecondRowLeft, true
+	default:
+		return vehicle.SeatUnknown, false
+	}
+}
+
+// SetSteeringWheelHeater is the simple on/off; some models also support
+// a level (Plaid), but the SDK's helper is boolean.
+func (s *TeslaService) SetSteeringWheelHeater(ctx context.Context, userID int64, on bool) error {
+	name := "steering_wheel_heater_off"
+	if on {
+		name = "steering_wheel_heater_on"
+	}
+	return s.runInfotainmentCommand(ctx, userID, name, true, func(car *vehicle.Vehicle) error {
+		return car.SetSteeringWheelHeater(ctx, on)
 	})
 }
 
@@ -997,9 +1185,82 @@ func (s *TeslaService) updateClimate(cl *carserver.ClimateState) {
 	s.snap.OutsideTempC = cl.GetOutsideTempCelsius()
 	s.snap.DriverTempSetC = cl.GetDriverTempSetting()
 	s.snap.IsClimateOn = cl.GetIsClimateOn()
+	s.snap.IsPreconditioning = cl.GetIsPreconditioning()
 	s.snap.FanStatus = cl.GetFanStatus()
 	s.snap.SeatHeaterLeft = cl.GetSeatHeaterLeft()
 	s.snap.SeatHeaterRight = cl.GetSeatHeaterRight()
+	s.snap.SeatHeaterRearLeft = cl.GetSeatHeaterRearLeft()
+	s.snap.SeatHeaterRearCenter = cl.GetSeatHeaterRearCenter()
+	s.snap.SeatHeaterRearRight = cl.GetSeatHeaterRearRight()
+	s.snap.SteeringWheelHeater = cl.GetSteeringWheelHeater()
+	s.snap.FrontDefrosterOn = cl.GetIsFrontDefrosterOn()
+	s.snap.RearDefrosterOn = cl.GetIsRearDefrosterOn()
+	s.snap.CabinOverheatProtection = cl.GetAllowCabinOverheatProtection()
+}
+
+// updateClosures takes the CarServer (Infotainment) ClosuresState —
+// richer than VCSEC's set: includes windows + sentry-mode availability
+// + the post-press latches on the charge port that VCSEC's sensor
+// lags on. We only PARTIALLY merge into the closures snapshot — keep
+// the door states from VCSEC (more reliable for those) but take
+// windows + sentry from here.
+func (s *TeslaService) updateClosures(cs *carserver.ClosuresState) {
+	if cs == nil {
+		return
+	}
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	s.snap.Closures.WindowDriverFront = cs.GetWindowOpenDriverFront()
+	s.snap.Closures.WindowPassengerFront = cs.GetWindowOpenPassengerFront()
+	s.snap.Closures.WindowDriverRear = cs.GetWindowOpenDriverRear()
+	s.snap.Closures.WindowPassengerRear = cs.GetWindowOpenPassengerRear()
+	s.snap.Closures.SentryAvailable = cs.GetSentryModeAvailable()
+	if sm := cs.GetSentryModeState(); sm != nil {
+		// SentryModeState is a oneof — GetType() returns an interface
+		// whose concrete type tells us which state we're in. Armed +
+		// Aware + Panic all count as "on" from an operator's POV
+		// (the car is actively monitoring); Off + Idle are off.
+		switch sm.GetType().(type) {
+		case *carserver.ClosuresState_SentryModeState_Armed,
+			*carserver.ClosuresState_SentryModeState_Aware,
+			*carserver.ClosuresState_SentryModeState_Panic:
+			s.snap.Closures.SentryOn = true
+		default:
+			s.snap.Closures.SentryOn = false
+		}
+	}
+}
+
+func (s *TeslaService) updateTirePressure(tp *carserver.TirePressureState) {
+	if tp == nil {
+		return
+	}
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	s.lastTPAt = time.Now()
+	s.snap.TirePressure = TirePressureSnapshot{
+		FrontLeftBar:          tp.GetTpmsPressureFl(),
+		FrontRightBar:         tp.GetTpmsPressureFr(),
+		RearLeftBar:           tp.GetTpmsPressureRl(),
+		RearRightBar:          tp.GetTpmsPressureRr(),
+		HardWarningFrontLeft:  tp.GetTpmsHardWarningFl(),
+		HardWarningFrontRight: tp.GetTpmsHardWarningFr(),
+		HardWarningRearLeft:   tp.GetTpmsHardWarningRl(),
+		HardWarningRearRight:  tp.GetTpmsHardWarningRr(),
+	}
+}
+
+func (s *TeslaService) updateLocation(ls *carserver.LocationState) {
+	if ls == nil {
+		return
+	}
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	s.lastLocationAt = time.Now()
+	s.snap.Location = LocationSnapshot{
+		Latitude:  ls.GetLatitude(),
+		Longitude: ls.GetLongitude(),
+	}
 }
 
 // ── enum → string helpers (templates can't import the SDK protos) ──

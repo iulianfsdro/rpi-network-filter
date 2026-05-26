@@ -126,7 +126,15 @@
                             </div>
                             <div class="stat-row">
                                 <span>Charge limit</span>
-                                <strong x-text="(charge.charge_limit_soc || 0) + '%'"></strong>
+                                <div style="display:flex; align-items:center; gap:8px;">
+                                    <input type="range" min="50" max="100" step="5"
+                                           x-model.number="chargeLimitDraft"
+                                           @change="setChargeLimit($event.target.value)"
+                                           :disabled="busy"
+                                           style="width:120px;">
+                                    <strong style="min-width:48px; text-align:right;"
+                                            x-text="chargeLimitDraft + '%'"></strong>
+                                </div>
                             </div>
                             <div class="stat-row" x-show="(charge.charger_power_kw || 0) > 0">
                                 <span>Charging at</span>
@@ -189,9 +197,46 @@
                             <span>Setpoint</span>
                             <strong><span x-text="formatTemp(climate.driver_temp_set_c)"></span> °C</strong>
                         </div>
-                        <div class="form-row" style="margin-top:12px; gap:8px;">
+                        <div class="form-row" style="margin-top:12px; gap:8px; flex-wrap:wrap;">
                             <button class="btn" @click="cmd('climate-on')" :disabled="busy">Turn on</button>
                             <button class="btn ghost" @click="cmd('climate-off')" :disabled="busy">Turn off</button>
+                            <button class="btn"
+                                    :class="climate.is_preconditioning ? '' : 'ghost'"
+                                    @click="cmd(climate.is_preconditioning ? 'defrost-off' : 'defrost-on')"
+                                    :disabled="busy">
+                                <span x-text="climate.is_preconditioning ? 'Defrost ON' : 'Defrost'"></span>
+                            </button>
+                            <button class="btn"
+                                    :class="climate.cabin_overheat_protection ? '' : 'ghost'"
+                                    @click="cmd(climate.cabin_overheat_protection ? 'cabin-overheat-off' : 'cabin-overheat-on')"
+                                    :disabled="busy">
+                                <span x-text="climate.cabin_overheat_protection ? 'Cabin protect ON' : 'Cabin protect'"></span>
+                            </button>
+                            <button class="btn"
+                                    :class="climate.steering_wheel_heater ? '' : 'ghost'"
+                                    @click="cmd(climate.steering_wheel_heater ? 'steering-wheel-heater-off' : 'steering-wheel-heater-on')"
+                                    :disabled="busy">
+                                <span x-text="climate.steering_wheel_heater ? 'Wheel heat ON' : 'Wheel heat'"></span>
+                            </button>
+                        </div>
+
+                        <!-- Per-seat heater sliders. Tesla supports 0..3 (off/low/med/high). -->
+                        <div style="margin-top:16px;">
+                            <div class="card-head-sub" style="margin-bottom:8px;">Seat heaters</div>
+                            <template x-for="s in seatHeaters" :key="s.position">
+                                <div class="stat-row">
+                                    <span x-text="s.label"></span>
+                                    <div style="display:flex; align-items:center; gap:8px;">
+                                        <input type="range" min="0" max="3" step="1"
+                                               :value="s.level"
+                                               @change="setSeatHeater(s.position, $event.target.value)"
+                                               :disabled="busy"
+                                               style="width:120px;">
+                                        <strong style="min-width:48px; text-align:right;"
+                                                x-text="['off','low','med','high'][s.level]"></strong>
+                                    </div>
+                                </div>
+                            </template>
                         </div>
                     </div>
                 </div>
@@ -223,8 +268,98 @@
                                     title="Triggers the Tesla's Homelink relay at the car's current GPS position. If you're parked at a stored Homelink (your garage, gate, etc.), the matching one fires.">
                                 Open garage
                             </button>
+                            <button class="btn" @click="cmd('vent-windows')" :disabled="busy">Vent windows</button>
+                            <button class="btn" @click="cmd('close-windows')" :disabled="busy">Close windows</button>
+                            <button class="btn"
+                                    :class="((vcsec || {}).closures || {}).sentry_on ? '' : 'ghost'"
+                                    @click="cmd(((vcsec || {}).closures || {}).sentry_on ? 'sentry-off' : 'sentry-on')"
+                                    :disabled="busy">
+                                <span x-text="((vcsec || {}).closures || {}).sentry_on ? 'Sentry ON' : 'Sentry'"></span>
+                            </button>
+                            <button class="btn ghost"
+                                    @click="cmd('keep-accessory-power-on')"
+                                    :disabled="busy"
+                                    title="Keep cabin powered after Park — drains ~1%/hour from the 12V. Toggle off via climate-off when done.">
+                                Keep accessory power
+                            </button>
                             <button class="btn ghost" @click="cmd('wake')" :disabled="busy">Wake</button>
                         </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ── Tires + Location ──────────────────────────────── -->
+            <div class="grid-2">
+                <div class="card">
+                    <div class="card-head">
+                        <div>
+                            <div class="card-head-title">Tire pressure</div>
+                            <div class="card-head-sub" x-text="tiresFreshnessLabel"></div>
+                        </div>
+                        <span class="card-head-spacer"></span>
+                        <span class="badge" :class="anyTireWarning ? 'danger' : 'muted'"
+                              x-text="anyTireWarning ? 'low' : 'ok'"></span>
+                    </div>
+                    <div class="card-body">
+                        <template x-if="!hasTireData">
+                            <div class="empty">No tire data yet. Pull-to-refresh to wake infotainment and poll.</div>
+                        </template>
+                        <template x-if="hasTireData">
+                            <div class="tire-grid">
+                                <template x-for="t in tireCards" :key="t.key">
+                                    <div class="tire-card" :class="t.warn ? 'warn' : ''">
+                                        <div class="tire-label" x-text="t.label"></div>
+                                        <div class="tire-value">
+                                            <strong x-text="t.bar.toFixed(1)"></strong>
+                                            <span class="tire-unit">bar</span>
+                                        </div>
+                                        <div class="tire-value tire-psi">
+                                            <span x-text="(t.bar * 14.504).toFixed(0) + ' psi'"></span>
+                                        </div>
+                                    </div>
+                                </template>
+                            </div>
+                        </template>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-head">
+                        <div>
+                            <div class="card-head-title">Location</div>
+                            <div class="card-head-sub" x-text="locationFreshnessLabel"></div>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <template x-if="!hasLocation">
+                            <div class="empty">Location not polled yet, or the car's GPS hasn't fixed.</div>
+                        </template>
+                        <template x-if="hasLocation">
+                            <div>
+                                <div class="stat-row">
+                                    <span>Latitude</span>
+                                    <strong class="mono" x-text="location.latitude.toFixed(6)"></strong>
+                                </div>
+                                <div class="stat-row">
+                                    <span>Longitude</span>
+                                    <strong class="mono" x-text="location.longitude.toFixed(6)"></strong>
+                                </div>
+                                <div class="form-row" style="margin-top:12px; gap:8px; flex-wrap:wrap;">
+                                    <a class="btn" target="_blank" rel="noopener"
+                                       :href="'https://www.openstreetmap.org/?mlat=' + location.latitude + '&mlon=' + location.longitude + '#map=18/' + location.latitude + '/' + location.longitude">
+                                        Open in OSM
+                                    </a>
+                                    <a class="btn ghost" target="_blank" rel="noopener"
+                                       :href="'https://maps.apple.com/?ll=' + location.latitude + ',' + location.longitude + '&q=Tesla'">
+                                        Apple Maps
+                                    </a>
+                                    <a class="btn ghost" target="_blank" rel="noopener"
+                                       :href="'https://maps.google.com/?q=' + location.latitude + ',' + location.longitude">
+                                        Google Maps
+                                    </a>
+                                </div>
+                            </div>
+                        </template>
                     </div>
                 </div>
             </div>
@@ -290,9 +425,14 @@ function garageApp() {
         vcsec: {},
         charge: {},
         climate: {},
+        tires: {},
+        location: {},
         bcsFreshnessMs: null,
         chargeFreshnessMs: null,
         climateFreshnessMs: null,
+        tiresFreshnessMs: null,
+        locationFreshnessMs: null,
+        chargeLimitDraft: 80, // local input model, synced from charge.charge_limit_soc
 
         // recent activity
         log: [],
@@ -401,12 +541,21 @@ function garageApp() {
                 const q = mode ? '?refresh=' + mode : '';
                 const r = await api.get('/api/tesla/state' + q);
                 if (r && r.snapshot) {
-                    this.vcsec   = r.snapshot.vcsec || {};
-                    this.charge  = r.snapshot.charge || {};
-                    this.climate = r.snapshot.climate || {};
-                    this.bcsFreshnessMs     = (r.snapshot.vcsec   || {}).freshness_ms;
-                    this.chargeFreshnessMs  = (r.snapshot.charge  || {}).freshness_ms;
-                    this.climateFreshnessMs = (r.snapshot.climate || {}).freshness_ms;
+                    this.vcsec    = r.snapshot.vcsec    || {};
+                    this.charge   = r.snapshot.charge   || {};
+                    this.climate  = r.snapshot.climate  || {};
+                    this.tires    = r.snapshot.tires    || {};
+                    this.location = r.snapshot.location || {};
+                    this.bcsFreshnessMs      = (r.snapshot.vcsec    || {}).freshness_ms;
+                    this.chargeFreshnessMs   = (r.snapshot.charge   || {}).freshness_ms;
+                    this.climateFreshnessMs  = (r.snapshot.climate  || {}).freshness_ms;
+                    this.tiresFreshnessMs    = (r.snapshot.tires    || {}).freshness_ms;
+                    this.locationFreshnessMs = (r.snapshot.location || {}).freshness_ms;
+                    // Sync the slider draft only when we have a fresh reading
+                    // and the user isn't actively dragging the slider right now.
+                    if (this.chargeFreshnessMs != null && !this.busy && this.charge.charge_limit_soc) {
+                        this.chargeLimitDraft = this.charge.charge_limit_soc;
+                    }
                 }
                 if (r && r.error) notify(r.error, 'warn');
             } catch (e) { /* keep last good snapshot */ }
@@ -444,10 +593,81 @@ function garageApp() {
             catch (e) {}
         },
 
+        // setChargeLimit fires when the slider releases (input @change).
+        // Posts to /api/tesla/commands/set-charging-limit with {percent}.
+        // After the SDK confirms, we trigger a full refresh so the next
+        // ChargeState read shows the new limit.
+        async setChargeLimit(percent) {
+            this.busy = true;
+            try {
+                await api.post('/api/tesla/commands/set-charging-limit', { percent: Number(percent) });
+                notify('charge limit → ' + percent + '%', 'success');
+                setTimeout(() => this.refresh('full'), 1500);
+                this.loadLog();
+            } catch (e) {
+                notify(e.message || 'set charge limit failed', 'danger');
+            } finally {
+                this.busy = false;
+            }
+        },
+
+        // setSeatHeater fires when a per-seat slider changes.
+        async setSeatHeater(position, level) {
+            this.busy = true;
+            try {
+                await api.post('/api/tesla/commands/set-seat-heater', {
+                    position: position, level: Number(level)
+                });
+                notify(position + ' heater → ' + ['off','low','med','high'][level], 'success');
+                setTimeout(() => this.refresh('full'), 1500);
+                this.loadLog();
+            } catch (e) {
+                notify(e.message || 'seat heater failed', 'danger');
+            } finally {
+                this.busy = false;
+            }
+        },
+
         // ── derived UI helpers ─────────────────────────────────
         get vcsecFreshnessLabel() { return this._fresh(this.bcsFreshnessMs); },
         get chargeFreshnessLabel() { return this._fresh(this.chargeFreshnessMs); },
         get climateFreshnessLabel() { return this._fresh(this.climateFreshnessMs); },
+        get tiresFreshnessLabel() { return this._fresh(this.tiresFreshnessMs); },
+        get locationFreshnessLabel() { return this._fresh(this.locationFreshnessMs); },
+
+        get hasTireData() {
+            return this.tiresFreshnessMs != null && (
+                this.tires.front_left_bar > 0 ||
+                this.tires.front_right_bar > 0 ||
+                this.tires.rear_left_bar > 0 ||
+                this.tires.rear_right_bar > 0
+            );
+        },
+        get anyTireWarning() {
+            return !!(this.tires.warn_front_left || this.tires.warn_front_right ||
+                      this.tires.warn_rear_left || this.tires.warn_rear_right);
+        },
+        get tireCards() {
+            return [
+                { key: 'fl', label: 'Front L', bar: this.tires.front_left_bar  || 0, warn: !!this.tires.warn_front_left },
+                { key: 'fr', label: 'Front R', bar: this.tires.front_right_bar || 0, warn: !!this.tires.warn_front_right },
+                { key: 'rl', label: 'Rear L',  bar: this.tires.rear_left_bar   || 0, warn: !!this.tires.warn_rear_left },
+                { key: 'rr', label: 'Rear R',  bar: this.tires.rear_right_bar  || 0, warn: !!this.tires.warn_rear_right },
+            ];
+        },
+
+        get hasLocation() {
+            return this.locationFreshnessMs != null &&
+                this.location && (this.location.latitude || this.location.longitude);
+        },
+
+        get seatHeaters() {
+            return [
+                { position: 'front-left',  label: 'Driver',     level: this.climate.seat_heater_left || 0 },
+                { position: 'front-right', label: 'Passenger',  level: this.climate.seat_heater_right || 0 },
+                { position: 'rear-left',   label: 'Rear left',  level: this.climate.seat_heater_rear_left || 0 },
+            ];
+        },
         _fresh(ms) {
             if (ms == null) return 'never polled';
             if (ms < 5000)   return 'fresh';
@@ -494,7 +714,8 @@ function garageApp() {
         },
         get closureCards() {
             const c = (this.vcsec || {}).closures || {};
-            const items = [
+            // VCSEC closures (door + trunk + frunk + charge port + tonneau)
+            const doorItems = [
                 ['front_driver_door',    'Driver door'],
                 ['front_passenger_door', 'Passenger door'],
                 ['rear_driver_door',     'Driver rear'],
@@ -503,12 +724,9 @@ function garageApp() {
                 ['rear_trunk',           'Trunk'],
                 ['charge_port',          'Charge port'],
             ];
-            return items.map(([key, label]) => {
+            const cards = doorItems.map(([key, label]) => {
                 let state = c[key] || 'unknown';
                 let open  = state !== 'closed' && state !== 'unknown';
-                // Charge port specifically: VCSEC sensor lags reality;
-                // the Infotainment ChargeState's charge_port_door_open
-                // bool is closer to the truth. Use it when fresh.
                 if (key === 'charge_port' && this.chargeFreshnessMs != null
                         && this.charge && typeof this.charge.charge_port_open === 'boolean') {
                     open  = this.charge.charge_port_open;
@@ -516,6 +734,20 @@ function garageApp() {
                 }
                 return { key, label, state, open };
             });
+            // Windows from Infotainment closures — booleans
+            const windowItems = [
+                ['window_driver_front',    'Driver window'],
+                ['window_passenger_front', 'Passenger window'],
+                ['window_driver_rear',     'Driver rear window'],
+                ['window_passenger_rear',  'Passenger rear window'],
+            ];
+            for (const [key, label] of windowItems) {
+                const v = c[key];
+                if (typeof v === 'boolean') {
+                    cards.push({ key, label, state: v ? 'open' : 'closed', open: v });
+                }
+            }
+            return cards;
         },
         formatTemp(c) { return (c == null || isNaN(c)) ? '—' : c.toFixed(1); },
         formatMinutes(m) {
@@ -558,6 +790,17 @@ function garageApp() {
 .badge.muted { background: rgba(129, 129, 129, 0.15); color: var(--muted); }
 .form-error { color: var(--danger); margin-top: 8px; font-size: 13px; }
 .empty { padding: 24px; text-align: center; color: var(--muted); }
+.tire-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+.tire-card {
+    padding: 14px; border-radius: 10px; background: #161616;
+    border: 1px solid #212121; text-align: center;
+}
+.tire-card.warn { border-color: var(--danger); background: rgba(224, 36, 52, 0.08); }
+.tire-label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 6px; }
+.tire-value { font-size: 20px; font-feature-settings: 'tnum'; line-height: 1.2; }
+.tire-value strong { font-weight: 600; }
+.tire-unit { font-size: 12px; color: var(--muted); margin-left: 4px; }
+.tire-psi { font-size: 12px; color: var(--muted); }
 .callout {
     padding: 12px 14px;
     border-radius: 8px;

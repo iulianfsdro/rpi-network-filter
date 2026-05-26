@@ -275,6 +275,37 @@ func (h *TeslaHandler) Command(w http.ResponseWriter, r *http.Request) {
 		err = h.tesla.SetSentryMode(ctx, userID, false)
 	case "homelink":
 		err = h.tesla.TriggerHomelink(ctx, userID)
+	case "vent-windows":
+		err = h.tesla.VentWindows(ctx, userID)
+	case "close-windows":
+		err = h.tesla.CloseWindows(ctx, userID)
+	case "defrost-on":
+		err = h.tesla.SetDefrost(ctx, userID, true)
+	case "defrost-off":
+		err = h.tesla.SetDefrost(ctx, userID, false)
+	case "cabin-overheat-on":
+		err = h.tesla.SetCabinOverheatProtection(ctx, userID, true)
+	case "cabin-overheat-off":
+		err = h.tesla.SetCabinOverheatProtection(ctx, userID, false)
+	case "keep-accessory-power-on":
+		err = h.tesla.SetKeepAccessoryPower(ctx, userID, true)
+	case "keep-accessory-power-off":
+		err = h.tesla.SetKeepAccessoryPower(ctx, userID, false)
+	case "steering-wheel-heater-on":
+		err = h.tesla.SetSteeringWheelHeater(ctx, userID, true)
+	case "steering-wheel-heater-off":
+		err = h.tesla.SetSteeringWheelHeater(ctx, userID, false)
+	case "set-seat-heater":
+		// JSON body: {"position": "front-left", "level": 2}
+		var body struct {
+			Position string `json:"position"`
+			Level    int    `json:"level"`
+		}
+		if derr := decodeJSON(r, &body); derr != nil {
+			JSONError(w, http.StatusBadRequest, derr.Error())
+			return
+		}
+		err = h.tesla.SetSeatHeater(ctx, userID, body.Position, body.Level)
 	default:
 		JSONError(w, http.StatusNotFound, "unknown command")
 		return
@@ -315,7 +346,7 @@ func serializeSnapshot(s services.VehicleSnapshot) map[string]any {
 			"lock_state":   s.LockState,
 			"sleep_status": s.SleepStatus,
 			"user_present": s.UserPresent,
-			"closures": map[string]string{
+			"closures": map[string]any{
 				"front_driver_door":    s.Closures.FrontDriverDoor,
 				"front_passenger_door": s.Closures.FrontPassengerDoor,
 				"rear_driver_door":     s.Closures.RearDriverDoor,
@@ -324,6 +355,15 @@ func serializeSnapshot(s services.VehicleSnapshot) map[string]any {
 				"rear_trunk":           s.Closures.RearTrunk,
 				"charge_port":          s.Closures.ChargePort,
 				"tonneau":              s.Closures.Tonneau,
+				// Windows + sentry come from the Infotainment ClosuresState;
+				// surfaced here so the UI has one homogeneous "closures"
+				// blob to read from.
+				"window_driver_front":    s.Closures.WindowDriverFront,
+				"window_passenger_front": s.Closures.WindowPassengerFront,
+				"window_driver_rear":     s.Closures.WindowDriverRear,
+				"window_passenger_rear":  s.Closures.WindowPassengerRear,
+				"sentry_available":       s.Closures.SentryAvailable,
+				"sentry_on":              s.Closures.SentryOn,
 			},
 			"freshness_ms": freshness(s.BCSFreshness),
 		},
@@ -341,14 +381,38 @@ func serializeSnapshot(s services.VehicleSnapshot) map[string]any {
 			"freshness_ms":         freshness(s.ChargeFreshness),
 		},
 		"climate": map[string]any{
-			"inside_temp_c":      s.InsideTempC,
-			"outside_temp_c":     s.OutsideTempC,
-			"driver_temp_set_c":  s.DriverTempSetC,
-			"is_climate_on":      s.IsClimateOn,
-			"fan_status":         s.FanStatus,
-			"seat_heater_left":   s.SeatHeaterLeft,
-			"seat_heater_right":  s.SeatHeaterRight,
-			"freshness_ms":       freshness(s.ClimateFreshness),
+			"inside_temp_c":            s.InsideTempC,
+			"outside_temp_c":           s.OutsideTempC,
+			"driver_temp_set_c":        s.DriverTempSetC,
+			"is_climate_on":            s.IsClimateOn,
+			"is_preconditioning":       s.IsPreconditioning,
+			"fan_status":               s.FanStatus,
+			"seat_heater_left":         s.SeatHeaterLeft,
+			"seat_heater_right":        s.SeatHeaterRight,
+			"seat_heater_rear_left":    s.SeatHeaterRearLeft,
+			"seat_heater_rear_center":  s.SeatHeaterRearCenter,
+			"seat_heater_rear_right":   s.SeatHeaterRearRight,
+			"steering_wheel_heater":    s.SteeringWheelHeater,
+			"front_defroster_on":       s.FrontDefrosterOn,
+			"rear_defroster_on":        s.RearDefrosterOn,
+			"cabin_overheat_protection": s.CabinOverheatProtection,
+			"freshness_ms":             freshness(s.ClimateFreshness),
+		},
+		"tires": map[string]any{
+			"front_left_bar":  s.TirePressure.FrontLeftBar,
+			"front_right_bar": s.TirePressure.FrontRightBar,
+			"rear_left_bar":   s.TirePressure.RearLeftBar,
+			"rear_right_bar":  s.TirePressure.RearRightBar,
+			"warn_front_left":  s.TirePressure.HardWarningFrontLeft,
+			"warn_front_right": s.TirePressure.HardWarningFrontRight,
+			"warn_rear_left":   s.TirePressure.HardWarningRearLeft,
+			"warn_rear_right":  s.TirePressure.HardWarningRearRight,
+			"freshness_ms":     freshness(s.TPFreshness),
+		},
+		"location": map[string]any{
+			"latitude":     s.Location.Latitude,
+			"longitude":    s.Location.Longitude,
+			"freshness_ms": freshness(s.LocationFreshness),
 		},
 	}
 }
