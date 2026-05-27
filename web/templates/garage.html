@@ -527,6 +527,17 @@
                                         x-text="'Sound ' + s"></button>
                             </template>
                         </div>
+                        <div class="form-row" style="gap:8px; margin-top:10px; align-items:center;">
+                            <input type="number" class="input" min="0" max="65535" step="1"
+                                   placeholder="Sound ID"
+                                   x-model.number="boomboxId"
+                                   style="max-width:140px;">
+                            <button class="btn ghost"
+                                    @click="cmdJSON('boombox', { sound: boomboxId })"
+                                    :disabled="boomboxId === null || boomboxId === '' || boomboxId < 0">
+                                Play
+                            </button>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -1075,6 +1086,7 @@ function garageApp() {
         speedLimitDialogOpen: false,
         speedLimitPin: '',
         speedLimitMph: 70,
+        boomboxId: 9,
         _fresh(ms) {
             if (ms == null) return 'never polled';
             if (ms < 5000)   return 'fresh';
