@@ -566,3 +566,108 @@ code, .mono, .tnum { font-family: "JetBrains Mono", ui-monospace, monospace; fon
 .content::-webkit-scrollbar-track, .rail-nav::-webkit-scrollbar-track { background: transparent; }
 .content::-webkit-scrollbar-thumb, .rail-nav::-webkit-scrollbar-thumb { background: var(--line-bright); border-radius: 100px; }
 .content::-webkit-scrollbar-thumb:hover, .rail-nav::-webkit-scrollbar-thumb:hover { background: var(--line-strong); }
+
+/* ── Mobile: rail collapses to a hamburger drawer ─────────── */
+.head-bar-burger { display: none; }
+.nav-scrim { display: none; }
+
+@media (max-width: 900px) {
+  body { font-size: 14px; }
+  .app { grid-template-columns: 1fr; }
+  .rail {
+    position: fixed; inset: 0 auto 0 0;
+    width: 84vw; max-width: 320px;
+    z-index: 200;
+    transform: translateX(-100%);
+    transition: transform 0.24s ease;
+    border-right: 1px solid var(--line);
+    box-shadow: 0 24px 80px rgba(0, 0, 0, 0.6);
+  }
+  .nav-open .rail { transform: none; }
+  .nav-scrim {
+    display: block; position: fixed; inset: 0;
+    background: rgba(0, 0, 0, 0.55);
+    z-index: 150;
+    opacity: 0; pointer-events: none;
+    transition: opacity 0.2s;
+    backdrop-filter: blur(2px);
+  }
+  .nav-open .nav-scrim { opacity: 1; pointer-events: auto; }
+
+  .head-bar {
+    padding: 12px 16px;
+    min-height: 56px;
+    gap: 12px;
+  }
+  .head-bar-burger {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 38px; height: 38px;
+    background: transparent; border: 1px solid var(--line);
+    color: var(--fg); border-radius: 100px;
+    cursor: pointer; padding: 0; flex-shrink: 0;
+  }
+  .head-bar-burger svg { width: 18px; height: 18px; }
+  .head-bar-l { font-size: 12.5px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .head-bar-stat { font-size: 11px; }
+  .head-bar-stat span:last-child { display: none; }
+  .head-bar-stat-dot { width: 8px; height: 8px; }
+  .head-bar-divider { display: none; }
+
+  .content { padding: 20px 16px 60px; }
+
+  .page-head { grid-template-columns: 1fr; gap: 14px; margin-bottom: 22px; }
+  .page-head-title { font-size: 30px; letter-spacing: -0.03em; }
+  .page-head-sub { font-size: 13.5px; }
+  .page-head-right { gap: 6px; flex-wrap: wrap; }
+
+  .section-head { margin: 24px 0 12px; }
+  .section-head-title { font-size: 18px; }
+
+  /* Guardian hero stacks; the decorative SVG hides to save space */
+  .guardian {
+    grid-template-columns: 1fr; gap: 20px;
+    padding: 24px 22px;
+  }
+  .guardian-title { font-size: 36px; }
+  .guardian-sub { font-size: 13.5px; }
+  .guardian-stats { grid-template-columns: repeat(3, 1fr); gap: 16px; margin-top: 22px; }
+  .guardian-stat-value { font-size: 22px; }
+  .guardian-r { display: none; }
+
+  .stat-grid { grid-template-columns: repeat(2, 1fr); gap: 12px; }
+  .stat-card { padding: 18px 18px; min-height: 110px; }
+  .stat-card-value { font-size: 26px; }
+
+  .card-head { padding: 18px 18px 14px; }
+  .card-body { padding: 6px 18px 18px; }
+
+  .filter-head { grid-template-columns: 40px 1fr auto; padding: 16px 18px; gap: 12px; }
+  .filter-head-icon { width: 36px; height: 36px; font-size: 14px; }
+  .filter-name { font-size: 15px; }
+  .filter-body { padding: 16px 18px; }
+
+  /* Tables get horizontal scroll instead of squeezing */
+  .tbl-wrap, .card-body.tight { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .tbl { min-width: 600px; }
+  .tbl th, .tbl td { padding: 12px 16px; font-size: 12.5px; }
+  .tbl th { white-space: nowrap; }
+
+  .traffic-toolbar { padding: 12px 14px; gap: 8px; }
+
+  .kv { grid-template-columns: 1fr; gap: 4px 0; }
+  .kv dt { margin-top: 8px; }
+
+  .dialog { width: 100%; border-radius: 14px; }
+  .dialog-back { padding: 14px; }
+  .dialog-body { padding: 18px; max-height: 70vh; }
+  .dialog-foot { padding: 14px 18px; flex-wrap: wrap; }
+}
+
+@media (max-width: 560px) {
+  .stat-grid { grid-template-columns: 1fr; }
+  .guardian-stats { grid-template-columns: 1fr; }
+  .head-bar-stat { display: none; }
+  .head-bar-l span:first-child { display: none; }   /* hide "airgap /" prefix, keep page title */
+  .page-head-title { font-size: 26px; }
+  .guardian-title { font-size: 28px; }
+}

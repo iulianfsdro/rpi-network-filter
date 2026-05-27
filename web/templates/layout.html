@@ -11,7 +11,8 @@
     <link rel="stylesheet" href="/static/css/app.css">
 </head>
 <body>
-    <div class="app" x-data="shellApp()">
+    <div class="app" x-data="shellApp()" :class="{'nav-open': navOpen}">
+        <div class="nav-scrim" @click="navOpen = false"></div>
         <aside class="rail">
             <div class="rail-brand">
                 <a href="/" class="rail-brand-mark">
@@ -102,6 +103,9 @@
 
         <main class="main">
             <div class="head-bar">
+                <button class="head-bar-burger" @click="navOpen = !navOpen" :aria-expanded="navOpen" aria-label="Toggle navigation">
+                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M2 4h12M2 8h12M2 12h12"/></svg>
+                </button>
                 <div class="head-bar-l">
                     <span>airgap</span>
                     <span style="color:var(--fg-faint);">/</span>
@@ -132,6 +136,7 @@
     <script>
         function shellApp() {
             return {
+                navOpen: false,
                 shell: {
                     devicesOnline: 0,
                     devicesTotal: 0,
