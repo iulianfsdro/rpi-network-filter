@@ -388,6 +388,51 @@
                     </div>
                 </div>
 
+                <!-- This device — token info + self-revoke (Thread E) -->
+                <div class="card">
+                    <div class="card-head">
+                        <div>
+                            <div class="card-head-title">This device</div>
+                            <div class="card-head-sub">
+                                Bearer-token info for this client. To add another device
+                                or rotate this one, issue a new token from the Pi's
+                                <strong>/settings → BLE client tokens</strong> page.
+                            </div>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <template x-if="tokenInfo">
+                            <div>
+                                <div class="row" style="gap:24px; margin-bottom:14px;">
+                                    <div>
+                                        <div class="meta">Name</div>
+                                        <div class="cell-primary" x-text="tokenInfo.name"></div>
+                                    </div>
+                                    <div>
+                                        <div class="meta">Created</div>
+                                        <div class="cell-mac" x-text="new Date(tokenInfo.created_at).toLocaleString()"></div>
+                                    </div>
+                                    <div>
+                                        <div class="meta">Last used</div>
+                                        <div class="cell-mac" x-text="tokenInfo.last_used_at ? new Date(tokenInfo.last_used_at).toLocaleString() : '—'"></div>
+                                    </div>
+                                </div>
+                                <button class="btn danger" @click="revokeSelf()" :disabled="revokingSelf"
+                                        x-text="revokingSelf ? 'Revoking…' : 'Revoke this device’s access'"></button>
+                                <div class="enrol-help" style="margin-top:8px;">
+                                    Server-side revoke. After this, the client app on this
+                                    device can no longer drive the car until the Pi operator
+                                    issues a fresh token. The car-side enrolment of the device
+                                    key persists.
+                                </div>
+                            </div>
+                        </template>
+                        <template x-if="!tokenInfo">
+                            <div class="meta">No token info loaded.</div>
+                        </template>
+                    </div>
+                </div>
+
                 <!-- Activity strip -->
                 <div class="card">
                     <div class="card-head">

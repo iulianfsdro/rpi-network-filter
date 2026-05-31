@@ -134,6 +134,11 @@ function clientApp() {
         directBusy: false,
         directStatus: '',
 
+        // Bearer self-management (Thread E). Populated from
+        // /api/ble/token on connect.
+        tokenInfo: null,
+        revokingSelf: false,
+
         // Convenience helpers for templates that don't want a long
         // ternary at the binding site.
         get locked() { return this.state?.locked === true; },
@@ -219,6 +224,7 @@ function clientApp() {
                 this.screen = 'garage';
                 if (!silent) notify('Connected ✓', 'success');
                 await this.loadKeyState();
+                await this.loadTokenInfo();
                 await this.loadLog();
             } catch (e) {
                 this.enrolError = e.message || 'connect failed';
@@ -245,6 +251,7 @@ function clientApp() {
             this.hasKey = false;
             this.keyFp = '';
             this.vin = '';
+            this.tokenInfo = null;
             this.screen = 'enrol';
         },
 
@@ -408,6 +415,31 @@ function clientApp() {
                 notify(this.keyError, 'error');
             } finally {
                 this.enrolling = false;
+            }
+        },
+
+        // ─── Token self-management (Thread E) ───────────────────
+
+        async loadTokenInfo() {
+            try {
+                this.tokenInfo = await api.get('/token');
+            } catch (e) {
+                this.tokenInfo = null;
+                console.warn('[airgap] token info fetch failed:', e.message || e);
+            }
+        },
+        async revokeSelf() {
+            if (!confirm('Revoke this device\'s access from the Pi? Server-side revocation is permanent until the operator issues a fresh token. The car-side enrolment of your device key persists.')) return;
+            this.revokingSelf = true;
+            try {
+                await api.request('DELETE', '/token');
+                notify('Token revoked server-side — call api.* will now 401', 'success');
+                // After a beat, drop local state and go back to enrol.
+                setTimeout(() => this.forget(), 1500);
+            } catch (e) {
+                notify(e.message || 'self-revoke failed', 'error');
+            } finally {
+                this.revokingSelf = false;
             }
         },
 

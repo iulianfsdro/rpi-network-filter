@@ -120,6 +120,13 @@ func NewRouterWithFS(db *sql.DB, svc *services.Services, cfg config.Config, webF
 			// mostly empty).
 			r.Get("/log", teslaH.CommandLog)
 
+			// Bearer self-management. NOT an admin path — you can
+			// only see / revoke YOUR OWN token. Issuance stays on
+			// the cookie-authed /api/tesla/tokens path so a leaked
+			// bearer doesn't enable privilege escalation.
+			r.Get("/token", teslaH.MyTokenInfo)
+			r.Delete("/token", teslaH.RevokeMyToken)
+
 			// Raw byte forwarder — Phase 3b. Open a session, exchange
 			// opaque RoutableMessage bytes both ways, close. The Pi
 			// never inspects or decrypts payloads.

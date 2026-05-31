@@ -61,6 +61,47 @@ func (h *TeslaHandler) IssueToken(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// MyTokenInfo returns the bearer-authed caller's own token row —
+// name, created/last-used timestamps, no plaintext. Lets the client
+// app show "you're connected as 'ivan's macbook' since X" without
+// exposing the admin token-list endpoint.
+func (h *TeslaHandler) MyTokenInfo(w http.ResponseWriter, r *http.Request) {
+	tok := GetBLEClient(r)
+	if tok == nil {
+		// Should be impossible — BLEBearerRequired set this — but
+		// guard anyway so a refactor mistake surfaces loudly.
+		JSONError(w, http.StatusUnauthorized, "no bearer context")
+		return
+	}
+	JSON(w, http.StatusOK, tok)
+}
+
+// RevokeMyToken is the bearer-holder's self-destruct button. Marks
+// the caller's own token as revoked. Reversible only via re-issuing
+// from /settings on the Pi.
+//
+// Distinct from RevokeToken (admin): no id param, no privilege escalation.
+func (h *TeslaHandler) RevokeMyToken(w http.ResponseWriter, r *http.Request) {
+	tok := GetBLEClient(r)
+	if tok == nil {
+		JSONError(w, http.StatusUnauthorized, "no bearer context")
+		return
+	}
+	if err := h.tokens.Revoke(tok.ID); err != nil {
+		if errors.Is(err, services.ErrTeslaTokenNotFound) {
+			JSONError(w, http.StatusNotFound, err.Error())
+			return
+		}
+		JSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if h.audit != nil {
+		h.audit.Log("tesla.token_self_revoke",
+			"client:"+tok.Name+" self-revoked their own token")
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // RevokeToken flips revoked_at on the given token id. The path param
 // is the numeric id from the list endpoint, not the token plaintext —
 // we never round-trip plaintext.
