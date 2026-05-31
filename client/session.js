@@ -340,6 +340,76 @@ async function sendDirectCommandWithApi({ api, session, action }) {
     return respMsg;
 }
 
+// ── Session cache ────────────────────────────────────────────────
+//
+// Thread D: the SessionInfo handshake costs ~2 s round-trip over BLE.
+// Closing and reopening per command makes a UX flow of "lock, then
+// flash, then honk" feel sluggish. Cache the open session per domain
+// for a short idle window; reuse it; close it when the operator
+// leaves or the TTL expires.
+//
+// We DON'T cache across page reloads — a fresh tab opens a new
+// session. IndexedDB persistence would also need to survive the BLE
+// link surviving (which it doesn't — the car closes idle BLE links).
+
+const SESSION_IDLE_TTL_MS = 25_000; // safer than Tesla's ~30s BLE close
+const _domainCache = new Map(); // domain → { session, expiresAt, timer }
+
+// withCachedSession opens a session for `domain` or reuses a cached
+// one. The body runs with the session; if it throws, the cache is
+// invalidated (because we don't know if the session is still good).
+// Idle TTL resets after every successful body.
+async function withCachedSession({ api, vin, deviceKeyPair, domain }, body) {
+    let entry = _domainCache.get(domain);
+    if (entry && entry.expiresAt > Date.now()) {
+        try {
+            const result = await body(entry.session, /*cached*/true);
+            _refreshTtl(entry, domain);
+            return result;
+        } catch (e) {
+            // Session might be dead — drop the cache and let the
+            // caller retry with a fresh one (or surface the error).
+            _evict(domain);
+            throw e;
+        }
+    }
+    // No live cache. Open fresh.
+    const session = await openDirectSession({ api, vin, deviceKeyPair, domain });
+    entry = { session, expiresAt: 0, timer: null };
+    _domainCache.set(domain, entry);
+    _refreshTtl(entry, domain);
+    try {
+        return await body(session, /*cached*/false);
+    } catch (e) {
+        _evict(domain);
+        throw e;
+    }
+}
+
+function _refreshTtl(entry, domain) {
+    if (entry.timer) clearTimeout(entry.timer);
+    entry.expiresAt = Date.now() + SESSION_IDLE_TTL_MS;
+    entry.timer = setTimeout(() => _evict(domain), SESSION_IDLE_TTL_MS);
+}
+
+function _evict(domain) {
+    const entry = _domainCache.get(domain);
+    if (!entry) return;
+    if (entry.timer) clearTimeout(entry.timer);
+    _domainCache.delete(domain);
+    // Best-effort close. The session object holds its own close()
+    // closure that captures its api/sessionId — fire and forget.
+    entry.session.close().catch(() => {});
+}
+
+// closeAllCachedSessions drops every domain's cached session. Called
+// on page unload + on explicit "forget this Pi".
+function closeAllCachedSessions() {
+    for (const domain of [..._domainCache.keys()]) {
+        _evict(domain);
+    }
+}
+
 // honkAction returns the Action protobuf for an Infotainment honk.
 // Inner shape: Action{ VehicleAction{ VehicleControlHonkHornAction{} } }.
 // VehicleControlHonkHornAction has no fields; the very fact of it
@@ -365,6 +435,8 @@ function flashLightsAction() {
 Object.assign(window.airgap, {
     openDirectSession,
     sendDirectCommandWithApi,
+    withCachedSession,
+    closeAllCachedSessions,
     honkAction,
     flashLightsAction,
     DOMAIN_INFOTAINMENT:     3,

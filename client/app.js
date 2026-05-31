@@ -140,6 +140,15 @@ function clientApp() {
 
         // ─── Lifecycle ──────────────────────────────────────────
         async init() {
+            // Best-effort close of cached BLE sessions on tab close /
+            // reload — releases the Pi's BLE-mutex without waiting
+            // for the server-side idle reaper. We don't `await`
+            // anything inside beforeunload; just fire DELETE via
+            // sendBeacon (which survives navigation).
+            window.addEventListener('beforeunload', () => {
+                airgap.closeAllCachedSessions();
+            });
+
             // Restore previous enrolment (if any) from localStorage.
             // Auto-migrate legacy cfg.vin (cosmetic field that doubled
             // as nickname pre-Thread-B) into cfg.nickname.
@@ -227,13 +236,15 @@ function clientApp() {
         // side opt-out only.
         async forget() {
             if (!confirm('Forget this Pi? You\'ll need to paste the URL and token again. The bearer stays valid on the Pi — revoke it from /settings if you want it dead. The device key in IndexedDB will also be wiped — the car-side enrolment of its pubkey persists until you remove it manually from the Tesla mobile app.')) return;
+            airgap.closeAllCachedSessions();
             localStorage.removeItem(CFG_KEY);
             try { await airgap.deleteDeviceKey(); } catch (e) { /* nothing to wipe */ }
-            this.cfg = { api: '', token: '', vin: '' };
+            this.cfg = { api: '', token: '', nickname: '' };
             this.state = null;
             this.log = [];
             this.hasKey = false;
             this.keyFp = '';
+            this.vin = '';
             this.screen = 'enrol';
         },
 
@@ -296,8 +307,7 @@ function clientApp() {
         async _directDo(actionBuilder, label) {
             if (this.directBusy) return;
             this.directBusy = true;
-            this.directStatus = `[${label}] opening session…`;
-            let session = null;
+            this.directStatus = `[${label}] preparing…`;
             try {
                 const kp = await airgap.loadDeviceKey();
                 if (!kp) throw new Error('no device key — generate one first');
@@ -313,15 +323,22 @@ function clientApp() {
                 this.vin = pairInfo.vin;
                 const vin = pairInfo.vin;
 
-                session = await airgap.openDirectSession({
-                    api, vin, deviceKeyPair: kp,
-                    domain: airgap.DOMAIN_INFOTAINMENT,
-                });
-                this.directStatus = `[${label}] session open · counter=${session.counter} · sending…`;
-
-                const resp = await airgap.sendDirectCommandWithApi({
-                    api, session, action: actionBuilder(),
-                });
+                // Cached-session path (Thread D): the SessionInfo
+                // handshake costs ~2 s, so reuse the open BLE session
+                // across multiple commands fired within ~25 s of each
+                // other. First command in a flow opens fresh; the
+                // rest fly.
+                const resp = await airgap.withCachedSession(
+                    { api, vin, deviceKeyPair: kp, domain: airgap.DOMAIN_INFOTAINMENT },
+                    async (session, cached) => {
+                        this.directStatus = cached
+                            ? `[${label}] cached session · counter=${session.counter} · sending…`
+                            : `[${label}] new session · counter=${session.counter} · sending…`;
+                        return await airgap.sendDirectCommandWithApi({
+                            api, session, action: actionBuilder(),
+                        });
+                    },
+                );
 
                 // Full dump so we can read the exact car response.
                 console.log('[airgap] response RoutableMessage:', resp);
@@ -363,10 +380,9 @@ function clientApp() {
                 console.error('[airgap] direct command failed:', e);
                 this.directStatus = `[${label}] ✗ ${e.message || e}`;
                 notify(`${label}: ${e.message || e}`, 'error');
+                // withCachedSession evicts on error — no manual close
+                // needed here.
             } finally {
-                if (session) {
-                    try { await session.close(); } catch {}
-                }
                 this.directBusy = false;
             }
         },
