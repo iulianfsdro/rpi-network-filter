@@ -102,6 +102,7 @@ func NewRouterWithFS(db *sql.DB, svc *services.Services, cfg config.Config, webF
 			r.Use(BLEBearerRequired(svc.TeslaToken))
 			r.Get("/pair", teslaH.PairingInfo)
 			r.Post("/pair/request", teslaH.RequestPairing)
+			r.Post("/pair/external-pubkey", teslaH.PairExternalPubkey)
 			r.Get("/state", teslaH.State)
 			r.Get("/log", teslaH.CommandLog)
 			r.Post("/cmd/{name}", teslaH.Command)

@@ -15,6 +15,7 @@ package handlers
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"strconv"
@@ -112,6 +113,49 @@ func (h *TeslaHandler) RequestPairing(w http.ResponseWriter, r *http.Request) {
 	user := GetUser(r)
 	if user != nil {
 		h.audit.Log("tesla.pair_request", user.Username+" sent add-key-request to the car")
+	}
+	JSON(w, http.StatusOK, map[string]bool{"requested": true})
+}
+
+// PairExternalPubkey enrols a client-supplied P-256 public key on the
+// car. The client (laptop, phone PWA) has generated a non-extractable
+// WebCrypto keypair on first run; here it's submitting the public
+// half so the car adds it to its owner-key list. The operator still
+// has to tap the NFC card on the centre console to authorise — same
+// human gesture as the existing pairing flow.
+//
+// Body shape: { "public_key_b64": "<base64 SEC1 uncompressed point>" }.
+// 65 raw bytes (0x04 || X || Y) — the format crypto.subtle's
+// exportKey('raw', ecdhPubKey) produces, base64-encoded for transit.
+//
+// V4.4 Phase 3a. Once Phase 3c lands (client-side session crypto),
+// the enrolled key is what the client uses to sign every command,
+// and the Pi-resident key path goes away.
+func (h *TeslaHandler) PairExternalPubkey(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		PublicKeyB64 string `json:"public_key_b64"`
+	}
+	if err := decodeJSON(r, &body); err != nil {
+		JSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	pubBytes, err := base64.StdEncoding.DecodeString(body.PublicKeyB64)
+	if err != nil {
+		JSONError(w, http.StatusBadRequest, "invalid base64: "+err.Error())
+		return
+	}
+	ctx, cancel := teslaCtx(r, 45*time.Second)
+	defer cancel()
+	if err := h.tesla.RequestPairingExternal(ctx, pubBytes); err != nil {
+		JSONError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	user := GetUser(r)
+	if user != nil {
+		// Username here is "client:NAME" when called via the bearer
+		// path — see BLEBearerRequired's synthetic *models.User.
+		h.audit.Log("tesla.pair_request_external",
+			user.Username+" enrolled an external pubkey on the car")
 	}
 	JSON(w, http.StatusOK, map[string]bool{"requested": true})
 }

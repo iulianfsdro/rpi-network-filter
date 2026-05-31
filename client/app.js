@@ -109,6 +109,14 @@ function clientApp() {
         climateTarget: 22,
         chargeLimit: 80,
 
+        // Device-key state (V4.4 Phase 3a). hasKey + keyFp are
+        // populated by loadKeyState(); enrolling = true is set while
+        // the BLE add-key-request is in flight.
+        hasKey: false,
+        keyFp: '',
+        enrolling: false,
+        keyError: '',
+
         // Convenience helpers for templates that don't want a long
         // ternary at the binding site.
         get locked() { return this.state?.locked === true; },
@@ -148,6 +156,7 @@ function clientApp() {
                 this.vin = this.cfg.vin || '';
                 this.screen = 'garage';
                 if (!silent) notify('Connected ✓', 'success');
+                await this.loadKeyState();
                 await this.loadLog();
             } catch (e) {
                 this.enrolError = e.message || 'connect failed';
@@ -163,13 +172,80 @@ function clientApp() {
         // Does NOT revoke the bearer on the Pi side — that's an admin
         // action on /settings → BLE client tokens. This is a client-
         // side opt-out only.
-        forget() {
-            if (!confirm('Forget this Pi? You\'ll need to paste the URL and token again. The bearer stays valid on the Pi — revoke it from /settings if you want it dead.')) return;
+        async forget() {
+            if (!confirm('Forget this Pi? You\'ll need to paste the URL and token again. The bearer stays valid on the Pi — revoke it from /settings if you want it dead. The device key in IndexedDB will also be wiped — the car-side enrolment of its pubkey persists until you remove it manually from the Tesla mobile app.')) return;
             localStorage.removeItem(CFG_KEY);
+            try { await airgap.deleteDeviceKey(); } catch (e) { /* nothing to wipe */ }
             this.cfg = { api: '', token: '', vin: '' };
             this.state = null;
             this.log = [];
+            this.hasKey = false;
+            this.keyFp = '';
             this.screen = 'enrol';
+        },
+
+        // ─── Device key (Phase 3a) ──────────────────────────────
+        //
+        // loadKeyState pulls the persisted CryptoKeyPair from
+        // IndexedDB and computes a short fingerprint for the UI.
+        // Idempotent; called on garage-screen entry and after every
+        // generate / rotate / forget.
+        async loadKeyState() {
+            try {
+                const kp = await airgap.loadDeviceKey();
+                if (!kp) {
+                    this.hasKey = false;
+                    this.keyFp = '';
+                    return;
+                }
+                const raw = await airgap.exportPubkeyRaw(kp.publicKey);
+                this.hasKey = true;
+                this.keyFp = await airgap.fingerprintHex(raw);
+            } catch (e) {
+                this.hasKey = false;
+                this.keyFp = '';
+                this.keyError = 'key load failed: ' + (e.message || e);
+            }
+        },
+
+        // generateKey makes a fresh non-extractable P-256 keypair in
+        // WebCrypto and persists it. The private scalar never enters
+        // JS-visible memory — even this code can't read it back.
+        // Rotating an existing key requires explicit confirmation.
+        async generateKey() {
+            if (this.hasKey && !confirm('Replace the existing device key? The old key is destroyed locally; its car-side enrolment will still work until you remove it from the Tesla mobile app.')) return;
+            this.keyError = '';
+            try {
+                const kp = await airgap.generateDeviceKey();
+                await airgap.saveDeviceKey(kp);
+                await this.loadKeyState();
+                notify('Device key generated', 'success');
+            } catch (e) {
+                this.keyError = 'generate failed: ' + (e.message || e);
+                notify(this.keyError, 'error');
+            }
+        },
+
+        // enrolKey ships the public half to the Pi for the BLE
+        // add-key-request flow. The operator still has to tap the
+        // NFC card on the centre console — this just kicks off the
+        // car-side prompt.
+        async enrolKey() {
+            if (!this.hasKey) { notify('Generate a key first', 'error'); return; }
+            this.keyError = '';
+            this.enrolling = true;
+            try {
+                const kp = await airgap.loadDeviceKey();
+                const raw = await airgap.exportPubkeyRaw(kp.publicKey);
+                const b64 = airgap.bytesToBase64(raw);
+                await api.post('/pair/external-pubkey', { public_key_b64: b64 });
+                notify('Enrolment request sent — tap your NFC card on the centre console', 'success');
+            } catch (e) {
+                this.keyError = e.message || 'enrol failed';
+                notify(this.keyError, 'error');
+            } finally {
+                this.enrolling = false;
+            }
         },
 
         // ─── Polling + state refresh ────────────────────────────

@@ -464,6 +464,51 @@ func (s *TeslaService) RequestPairing(ctx context.Context) error {
 	})
 }
 
+// RequestPairingExternal mirrors RequestPairing but enrols a client-
+// supplied P-256 public key on the car instead of the Pi's own key.
+// Used by the v0 client during first-run keypair generation: the
+// client makes a non-extractable WebCrypto keypair, exports the
+// public point as raw SEC1 bytes, and ships it here to be added to
+// the car's owner-key list.
+//
+// pubKeyRawSEC1 is the 65-byte uncompressed point (0x04 || X || Y) —
+// the format crypto.subtle's `exportKey('raw', ecdhPubKey)` produces
+// for a P-256 ECDH public key, no further wrapping needed.
+//
+// V4.4 Phase 3a. The Pi's own key is still used to initialise the SDK
+// Vehicle struct (the SDK demands one even though SendAddKeyRequest is
+// unauthenticated and doesn't consult it for the request itself). The
+// actual cryptographic gate is the operator's physical NFC-card tap on
+// the centre console — the same human-in-the-loop step as the existing
+// pairing flow. After this call returns, ConfirmPairing-equivalent
+// behaviour proves enrolment by trying a signed session against THAT
+// pubkey — but the client can't do that yet (no session crypto on
+// the client until Phase 3c), so this is fire-and-forget for now.
+func (s *TeslaService) RequestPairingExternal(ctx context.Context, pubKeyRawSEC1 []byte) error {
+	// Validate the input shape FIRST — cheap, deterministic. Otherwise
+	// a missing VIN masks the real "your pubkey is malformed" error
+	// and the operator gets a misleading hint.
+	if len(pubKeyRawSEC1) != 65 || pubKeyRawSEC1[0] != 0x04 {
+		return fmt.Errorf("invalid SEC1 uncompressed P-256 point (expected 65 bytes starting 0x04, got %d bytes)", len(pubKeyRawSEC1))
+	}
+	pubKey, err := ecdh.P256().NewPublicKey(pubKeyRawSEC1)
+	if err != nil {
+		return fmt.Errorf("parse external public key: %w", err)
+	}
+	vin, err := s.requireVIN()
+	if err != nil {
+		return err
+	}
+	return s.sendUnauthenticated(ctx, vin, func(car *vehicle.Vehicle) error {
+		return car.SendAddKeyRequestWithRole(
+			ctx,
+			pubKey,
+			keysproto.Role_ROLE_DRIVER,
+			vcsec.KeyFormFactor_KEY_FORM_FACTOR_CLOUD_KEY,
+		)
+	})
+}
+
 // ConfirmPairing polls for the post-enrollment state — i.e. it tries a
 // signed VCSEC session against the configured VIN. If that succeeds,
 // the car has accepted our key and we record the success in

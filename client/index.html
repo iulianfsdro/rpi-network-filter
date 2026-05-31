@@ -307,6 +307,48 @@
                     </div>
                 </div>
 
+                <!-- Device key (Phase 3a) -->
+                <div class="card">
+                    <div class="card-head">
+                        <div>
+                            <div class="card-head-title">Device key</div>
+                            <div class="card-head-sub">
+                                <span x-show="hasKey">
+                                    Generated · fingerprint <code style="font-size:11px;" x-text="keyFp"></code>
+                                </span>
+                                <span x-show="!hasKey">Not generated yet</span>
+                            </div>
+                        </div>
+                        <div class="card-head-spacer"></div>
+                        <span class="badge" :class="hasKey ? 'success' : 'muted'"
+                              x-text="hasKey ? 'ready' : 'absent'"></span>
+                    </div>
+                    <div class="card-body">
+                        <p style="color:var(--fg-dim); font-size:13px; margin:0 0 14px; line-height:1.55;">
+                            A P-256 keypair generated and stored on this device only.
+                            The private half is <strong>non-extractable</strong> —
+                            it lives inside WebCrypto, backed by the OS key store,
+                            and even this app cannot read it back.
+                            <span x-show="!hasKey">Generate one, then enrol the public half on the car (NFC card tap required).</span>
+                            <span x-show="hasKey">Phase 3c will switch every command to be signed by this key locally; until then the Pi still does the BLE crypto with its own key. Enrolling this key now is harmless — Tesla supports multiple keys per car.</span>
+                        </p>
+                        <div class="row-wrap">
+                            <button class="btn"
+                                    x-show="!hasKey"
+                                    @click="generateKey()">Generate device key</button>
+                            <button class="btn"
+                                    x-show="hasKey"
+                                    @click="enrolKey()"
+                                    :disabled="enrolling"
+                                    x-text="enrolling ? 'Sending…' : 'Enrol on car (NFC tap)'"></button>
+                            <button class="btn ghost"
+                                    x-show="hasKey"
+                                    @click="generateKey()">Rotate</button>
+                        </div>
+                        <div x-show="keyError" class="protected-banner" style="margin-top:12px;" x-text="keyError"></div>
+                    </div>
+                </div>
+
                 <!-- Activity strip -->
                 <div class="card">
                     <div class="card-head">
@@ -351,6 +393,7 @@
     </div>
 
     <script src="alpine.min.js" defer></script>
+    <script src="keystore.js"></script>
     <script src="app.js"></script>
 </body>
 </html>
