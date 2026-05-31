@@ -199,6 +199,26 @@ class MetadataBlockBuilder {
         const digest = await crypto.subtle.digest('SHA-256', total);
         return new Uint8Array(digest);
     }
+    // hmac returns HMAC-SHA256( subkey, bytes() || 0xff || trailing ).
+    // Same shape as checksum() but with HMAC instead of plain SHA-256.
+    // Used for SessionInfo tag verification — proves the response
+    // really came from the car (who's the only other holder of the
+    // derived session key).
+    async hmac(subkeyBytes, trailing) {
+        const head = this.bytes();
+        const t = trailing || new Uint8Array(0);
+        const total = new Uint8Array(head.length + 1 + t.length);
+        total.set(head, 0);
+        total[head.length] = TAG.END;
+        total.set(t, head.length + 1);
+        const key = await crypto.subtle.importKey(
+            'raw', subkeyBytes,
+            { name: 'HMAC', hash: 'SHA-256' },
+            false, ['sign'],
+        );
+        const tag = await crypto.subtle.sign('HMAC', key, total);
+        return new Uint8Array(tag);
+    }
 }
 
 // buildAesGcmMetadata is the canonical builder for an AES-GCM

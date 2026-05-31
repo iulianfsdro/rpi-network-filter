@@ -117,6 +117,12 @@ function clientApp() {
         enrolling: false,
         keyError: '',
 
+        // Direct-crypto state (V4.4 Phase 3c-4). directBusy locks
+        // the button while a session is in flight; directStatus is
+        // the human-readable trail of the last attempt.
+        directBusy: false,
+        directStatus: '',
+
         // Convenience helpers for templates that don't want a long
         // ternary at the binding site.
         get locked() { return this.state?.locked === true; },
@@ -225,6 +231,99 @@ function clientApp() {
                 notify(this.keyError, 'error');
             }
         },
+
+        // directHonk / directFlashLights — Phase 3c-4.
+        //
+        // The end goal of the rearchitecture, exercised live: open a
+        // BLE session, do the SessionInfo handshake LOCALLY (ECDH
+        // against the car's ephemeral pubkey using our IndexedDB
+        // key), encrypt the command LOCALLY, ship ciphertext through
+        // the byte forwarder. The Pi sees opaque bytes the whole way.
+        //
+        // For this first proof of life:
+        //   • No SessionInfo HMAC check (TODO in session.js)
+        //   • No response decryption — the car's MessageStatus is
+        //     unencrypted and the physical horn/flash is the signal
+        //   • One session per click (open + send + close); fine for
+        //     a few-second UX, refactored to a cache next pass
+        async _directDo(actionBuilder, label) {
+            if (this.directBusy) return;
+            this.directBusy = true;
+            this.directStatus = `[${label}] opening session…`;
+            let session = null;
+            try {
+                const kp = await airgap.loadDeviceKey();
+                if (!kp) throw new Error('no device key — generate one first');
+                // The Pi's /pair endpoint is the canonical source of
+                // truth for the VIN — same value the SDK scans for
+                // over BLE AND the same value the car expects in the
+                // AAD's personalization tag. Don't trust the client's
+                // cfg.vin (cosmetic) for crypto.
+                const pairInfo = await api.get('/pair');
+                if (!pairInfo?.vin) {
+                    throw new Error('Pi has no VIN configured — set one on /garage');
+                }
+                const vin = pairInfo.vin;
+
+                session = await airgap.openDirectSession({
+                    api, vin, deviceKeyPair: kp,
+                    domain: airgap.DOMAIN_INFOTAINMENT,
+                });
+                this.directStatus = `[${label}] session open · counter=${session.counter} · sending…`;
+
+                const resp = await airgap.sendDirectCommandWithApi({
+                    api, session, action: actionBuilder(),
+                });
+
+                // Full dump so we can read the exact car response.
+                console.log('[airgap] response RoutableMessage:', resp);
+                console.log('[airgap] response keys:', Object.keys(resp));
+                console.log('[airgap] signedMessageStatus:', resp.signedMessageStatus);
+                console.log('[airgap] signedMessageStatus keys:',
+                    resp.signedMessageStatus ? Object.keys(resp.signedMessageStatus) : '(none)');
+
+                const status = resp.signedMessageStatus;
+                const opStatus = status?.operationStatus;
+                // The car may name the fault `signedMessageFault` (proto
+                // snake_case → camelCase) OR keep the original — try both.
+                const fault = status?.signedMessageFault
+                           ?? status?.signed_message_fault
+                           ?? status?.fault;
+                const faultName = ({
+                    0: 'NONE', 1: 'BUSY', 2: 'TIMEOUT', 3: 'UNKNOWN_KEY_ID',
+                    4: 'INACTIVE_KEY', 5: 'INVALID_SIGNATURE',
+                    6: 'INVALID_TOKEN_OR_COUNTER',
+                    7: 'INSUFFICIENT_PRIVILEGES', 8: 'INVALID_DOMAINS',
+                    9: 'INVALID_COMMAND', 10: 'DECODING', 11: 'INTERNAL',
+                    12: 'WRONG_PERSONALIZATION', 13: 'BAD_PARAMETER',
+                    14: 'KEYCHAIN_IS_FULL', 15: 'INCORRECT_EPOCH',
+                    16: 'IV_INCORRECT_LENGTH', 17: 'TIME_EXPIRED',
+                    18: 'NOT_PROVISIONED', 19: 'COULD_NOT_HASH_METADATA',
+                })[fault] || `unknown(${fault})`;
+
+                if (opStatus === 0 || opStatus === undefined) {
+                    this.directStatus = `[${label}] ✓ accepted by car`;
+                    notify(`${label} via device key ✓`, 'success');
+                } else {
+                    const msg = `[${label}] status=${opStatus} fault=${fault}(${faultName})`;
+                    this.directStatus = msg;
+                    console.warn('[airgap]', msg);
+                    notify(msg, 'error');
+                }
+                await this.loadLog();
+            } catch (e) {
+                console.error('[airgap] direct command failed:', e);
+                this.directStatus = `[${label}] ✗ ${e.message || e}`;
+                notify(`${label}: ${e.message || e}`, 'error');
+            } finally {
+                if (session) {
+                    try { await session.close(); } catch {}
+                }
+                this.directBusy = false;
+            }
+        },
+        directHonk()         { return this._directDo(airgap.honkAction,        'honk'); },
+        directFlashLights()  { return this._directDo(airgap.flashLightsAction, 'flash-lights'); },
 
         // enrolKey ships the public half to the Pi for the BLE
         // add-key-request flow. The operator still has to tap the

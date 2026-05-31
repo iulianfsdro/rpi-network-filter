@@ -345,6 +345,17 @@
                                     x-show="hasKey"
                                     @click="generateKey()">Rotate</button>
                         </div>
+                        <div class="row-wrap" style="margin-top:14px;" x-show="hasKey">
+                            <button class="btn primary"
+                                    @click="directHonk()"
+                                    :disabled="directBusy"
+                                    x-text="directBusy ? 'Sending…' : 'Honk (via device key)'"></button>
+                            <button class="btn"
+                                    @click="directFlashLights()"
+                                    :disabled="directBusy">Flash lights (via device key)</button>
+                        </div>
+                        <div x-show="directStatus" class="meta" style="margin-top:10px; padding:10px 12px; background:var(--bg-elev-2); border-radius:6px;"
+                             x-text="directStatus"></div>
                         <div x-show="keyError" class="protected-banner" style="margin-top:12px;" x-text="keyError"></div>
                     </div>
                 </div>
@@ -393,6 +404,10 @@
     </div>
 
     <script src="alpine.min.js" defer></script>
+    <script src="protobuf.min.js"></script>
+    <script src="proto.js"></script>
+    <script src="crypto.js"></script>
+    <script src="session.js"></script>
     <script src="keystore.js"></script>
     <script src="app.js"></script>
 </body>
