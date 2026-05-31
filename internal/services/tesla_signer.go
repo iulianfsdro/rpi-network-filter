@@ -18,6 +18,7 @@ package services
 import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
@@ -94,6 +95,47 @@ func (s *localFileSigner) Key() (protocol.ECDHPrivateKey, error) {
 		return nil, fmt.Errorf("stat key file: %w", err)
 	}
 	return nil, ErrPiKeyDisabled
+}
+
+// EphemeralSigner generates a fresh in-memory P-256 keypair on every
+// Key() call. Never persists, never returns the same key twice. Used
+// by sendUnauthenticated paths (currently only the SendAddKeyRequest
+// enrolment of an external client pubkey) where the SDK requires a
+// priv arg to construct *vehicle.Vehicle but doesn't actually consult
+// it for the unauthenticated transport handshake.
+//
+// V4.4 Phase 4 makes localFileSigner refuse to auto-generate, which
+// is correct for command-time signing — but the pairing flow still
+// needs *some* key value to satisfy NewVehicle's signature. An
+// ephemeral throwaway threads that needle: the Pi never persists it,
+// it never gets enrolled with any car, and it dies when the function
+// returns.
+type EphemeralSigner struct{}
+
+// NewEphemeralSigner wires a zero-state signer.
+func NewEphemeralSigner() *EphemeralSigner { return &EphemeralSigner{} }
+
+// Key produces a fresh P-256 keypair each call and returns it as a
+// protocol.ECDHPrivateKey. Goes through UnmarshalECDHPrivateKey with
+// the raw scalar so we don't have to round-trip through PEM.
+func (s *EphemeralSigner) Key() (protocol.ECDHPrivateKey, error) {
+	ecKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, fmt.Errorf("ephemeral key gen: %w", err)
+	}
+	scalar := ecKey.D.FillBytes(make([]byte, 32))
+	priv := protocol.UnmarshalECDHPrivateKey(scalar)
+	if priv == nil {
+		return nil, fmt.Errorf("unmarshal ephemeral key returned nil")
+	}
+	return priv, nil
+}
+
+// PublicKeyPEM is meaningless for an ephemeral signer — each call
+// would return a different pubkey. Returns an error so callers don't
+// silently use a key the next call won't recognise.
+func (s *EphemeralSigner) PublicKeyPEM() (string, error) {
+	return "", fmt.Errorf("ephemeral signer has no stable public key")
 }
 
 // PublicKeyPEM returns the matching public key as a PKIX-encoded PEM

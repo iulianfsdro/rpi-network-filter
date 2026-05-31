@@ -90,18 +90,24 @@ async function openDirectSession({ api, vin, deviceKeyPair, domain }) {
 
     try {
         // 2. Build a SessionInfoRequest wrapped in a RoutableMessage.
-        const challenge       = crypto.getRandomValues(new Uint8Array(16));
+        //
+        // The HMAC challenge value the car uses is the RoutableMessage's
+        // `uuid` field, NOT a separate sessionInfoRequest.challenge
+        // sub-field (which the SDK doesn't even set). The car copies our
+        // uuid into the response's request_uuid AND uses that same
+        // value as the HMAC challenge when signing the SessionInfo
+        // reply. Same bytes have to be on both sides for verification
+        // to pass.
         const routingAddress  = crypto.getRandomValues(new Uint8Array(ROUTING_ADDRESS_BYTES));
-        const requestUuid     = crypto.getRandomValues(new Uint8Array(16));
+        const challenge       = crypto.getRandomValues(new Uint8Array(16));
 
         const reqBytes = airgap.encodeMessage(proto.RoutableMessage, {
             toDestination:   { domain },
             fromDestination: { routingAddress },
             sessionInfoRequest: {
                 publicKey: myPubRaw,
-                challenge,
             },
-            uuid: requestUuid,
+            uuid: challenge,   // ← doubles as the HMAC challenge
         });
 
         const reqResp = await api.request('POST', `/sessions/${sessionId}/exchange`, {

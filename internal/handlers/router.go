@@ -44,7 +44,7 @@ func NewRouterWithFS(db *sql.DB, svc *services.Services, cfg config.Config, webF
 	filtH := NewFiltersHandler(svc, renderer)
 	settingsH := NewSettingsHandler(db, svc, renderer)
 	sysH := NewSystemHandler(svc)
-	teslaH := NewTeslaHandler(svc, renderer)
+	teslaH := NewTeslaHandler(svc)
 	remoteH := NewRemoteHandler(svc, renderer)
 
 	// Static assets
@@ -77,7 +77,9 @@ func NewRouterWithFS(db *sql.DB, svc *services.Services, cfg config.Config, webF
 		r.Get("/filters", filtH.Page)
 		r.Get("/bandwidth", bwH.Page)
 		r.Get("/settings", settingsH.Page)
-		r.Get("/garage", teslaH.Page)
+		// V4.4 Phase 4: /garage was the Pi-as-Tesla-driver UI.
+		// The Pi no longer holds a signing key; the client app
+		// (client/index.html) is the Tesla UI now.
 		r.Get("/remote-access", remoteH.Page)
 	})
 
@@ -86,26 +88,37 @@ func NewRouterWithFS(db *sql.DB, svc *services.Services, cfg config.Config, webF
 		r.Post("/login", authH.Login)
 		r.Post("/logout", authH.Logout)
 
-		// /api/ble/* — the bearer-authed BLE surface, intentionally
-		// separated from the cookie-authed admin API so it can be
-		// exposed publicly via Tailscale Funnel without dragging
-		// /login, /traffic, /settings along with it.
+		// /api/ble/* — the bearer-authed surface owned by the client
+		// app. Bearer-only (NO cookie auth path) so it can be exposed
+		// publicly via Tailscale Funnel without dragging /login,
+		// /traffic, /settings along with it.
 		//
-		// Same TeslaHandler methods as /api/tesla/* — the only
-		// difference is the auth gate (BLEBearerRequired synthesises
-		// a "client:NAME" virtual user for audit attribution).
+		// V4.4 Phase 4 stripped this down to the byte forwarder + the
+		// minimum config needed to bootstrap a client: read/write the
+		// VIN, enrol a client pubkey, and the raw BLE sessions API.
+		// All the per-command and state-poll endpoints that needed a
+		// Pi-resident signing key are gone.
 		r.Route("/ble", func(r chi.Router) {
 			// CORS comes BEFORE bearer auth so OPTIONS preflights
 			// don't need a token. The bearer is still required on
 			// every real request — CORS is just browser plumbing.
 			r.Use(BLECORS)
 			r.Use(BLEBearerRequired(svc.TeslaToken))
+
+			// Bootstrap config — what the client needs to know
+			// before opening a session.
 			r.Get("/pair", teslaH.PairingInfo)
-			r.Post("/pair/request", teslaH.RequestPairing)
+			r.Put("/vin", teslaH.SetVIN)
 			r.Post("/pair/external-pubkey", teslaH.PairExternalPubkey)
+
+			// State stub for the client's connectivity check (real
+			// state lives on the client side post-Phase-4 / Thread C).
 			r.Get("/state", teslaH.State)
+
+			// Audit trail (client-driven commands write here once the
+			// session-API layer learns to name them; today this is
+			// mostly empty).
 			r.Get("/log", teslaH.CommandLog)
-			r.Post("/cmd/{name}", teslaH.Command)
 
 			// Raw byte forwarder — Phase 3b. Open a session, exchange
 			// opaque RoutableMessage bytes both ways, close. The Pi
@@ -177,18 +190,14 @@ func NewRouterWithFS(db *sql.DB, svc *services.Services, cfg config.Config, webF
 				r.Post("/reboot", sysH.Reboot)
 			})
 
+			// /api/tesla — admin namespace for BLE-client-token
+			// management only. V4.4 Phase 4 stripped the per-command,
+			// state-poll, and pairing endpoints from here; the only
+			// reason this namespace still exists is that the
+			// session-cookie operator needs a way to mint + revoke
+			// bearer tokens for /api/ble/* clients, and the /settings
+			// page lives behind cookie auth.
 			r.Route("/tesla", func(r chi.Router) {
-				r.Get("/pair", teslaH.PairingInfo)
-				r.Post("/pair/request", teslaH.RequestPairing)
-				r.Post("/pair/confirm", teslaH.ConfirmPairing)
-				r.Put("/vin", teslaH.SetVIN)
-				r.Get("/state", teslaH.State)
-				r.Get("/log", teslaH.CommandLog)
-				r.Post("/commands/{name}", teslaH.Command)
-
-				// BLE client-token admin. Issue / list / revoke — the
-				// session-cookie operator only. Bearer tokens issued
-				// here unlock /api/ble/* for external clients.
 				r.Get("/tokens", teslaH.ListTokens)
 				r.Post("/tokens", teslaH.IssueToken)
 				r.Delete("/tokens/{id}", teslaH.RevokeToken)

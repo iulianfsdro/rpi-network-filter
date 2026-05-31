@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"crypto/tls"
 	"flag"
 	"fmt"
@@ -112,10 +111,10 @@ func main() {
 	}()
 	svc.TrafficLog.StartTailing()
 
-	// Tesla BLE poller — stays idle until a VIN is configured and a
-	// pairing has been confirmed; on those, polls body-controller-state
-	// every 30s to keep /garage's lock/closure widgets fresh.
-	svc.Tesla.Start(context.Background())
+	// V4.4 Phase 4: the Tesla background poller is gone. The Pi no
+	// longer holds a signing key, so it can't poll the car for
+	// state — the client app's /api/ble/sessions path does
+	// state reads on demand via its own crypto.
 
 	router := handlers.NewRouterWithFS(db, svc, cfg, web.Content)
 
