@@ -92,8 +92,19 @@ function clientApp() {
         // config the user lands on garage; otherwise on enrol.
         screen: 'enrol',
 
-        // The enrolment form state. cfg shape: {api, token, vin}.
-        cfg: { api: '', token: '', vin: '' },
+        // The enrolment form state. cfg shape: {api, token, nickname}.
+        // - api      : the byte-forwarder base URL (Pi's /api/ble)
+        // - token    : bearer token issued from the Pi's /settings page
+        // - nickname : display-only friendly name; the crypto VIN
+        //              lives on the Pi (set via PUT /api/ble/vin) and
+        //              is fetched on connect so the client can use it
+        //              for AES-GCM AAD personalization.
+        cfg: { api: '', token: '', nickname: '' },
+
+        // Migrate legacy cfg.vin entries (pre-Thread-B installs)
+        // automatically — see init().
+        vinInput: '',
+        savingVin: false,
         busy: false,
         enrolError: '',
 
@@ -130,20 +141,55 @@ function clientApp() {
         // ─── Lifecycle ──────────────────────────────────────────
         async init() {
             // Restore previous enrolment (if any) from localStorage.
+            // Auto-migrate legacy cfg.vin (cosmetic field that doubled
+            // as nickname pre-Thread-B) into cfg.nickname.
             try {
                 const raw = localStorage.getItem(CFG_KEY);
                 if (raw) {
                     const saved = JSON.parse(raw);
+                    if (saved.vin && !saved.nickname) {
+                        saved.nickname = saved.vin;
+                    }
+                    delete saved.vin;
                     if (saved.api && saved.token) {
-                        this.cfg = saved;
-                        api.use(saved);
-                        this.vin = saved.vin || '';
+                        this.cfg = {
+                            api: saved.api,
+                            token: saved.token,
+                            nickname: saved.nickname || '',
+                        };
+                        api.use(this.cfg);
                         await this.connect(/*silent*/true);
                         return;
                     }
                 }
             } catch (e) { /* fall through to enrol */ }
             this.screen = 'enrol';
+        },
+
+        // saveVin pushes the user-entered 17-char VIN to the Pi via
+        // PUT /api/ble/vin. Subsequent /pair fetches will return it,
+        // and crypto sessions will use it for AAD personalization.
+        async saveVin() {
+            const v = (this.vinInput || '').trim().toUpperCase();
+            if (v.length !== 17) {
+                notify('VIN must be exactly 17 characters', 'error');
+                return;
+            }
+            if (!/^[A-HJ-NPR-Z0-9]{17}$/i.test(v)) {
+                notify('VIN may only contain A-Z (no I,O,Q) and 0-9', 'error');
+                return;
+            }
+            this.savingVin = true;
+            try {
+                await api.request('PUT', '/vin', { vin: v });
+                this.vin = v;
+                this.vinInput = '';
+                notify('VIN saved ✓', 'success');
+            } catch (e) {
+                notify(e.message || 'save VIN failed', 'error');
+            } finally {
+                this.savingVin = false;
+            }
         },
 
         // connect health-checks the Pi (issues /state) and on success
@@ -155,11 +201,12 @@ function clientApp() {
             this.busy = true;
             try {
                 api.use(this.cfg);
-                // /state proves three things at once: URL is reachable,
-                // bearer is valid, and the Pi can read its own snapshot.
+                // /state is the Pi's connectivity stub post-Thread-A.
+                // /pair is what carries the canonical VIN.
                 this.state = await api.get('/state');
+                const pairInfo = await api.get('/pair');
+                this.vin = pairInfo?.vin || '';
                 localStorage.setItem(CFG_KEY, JSON.stringify(this.cfg));
-                this.vin = this.cfg.vin || '';
                 this.screen = 'garage';
                 if (!silent) notify('Connected ✓', 'success');
                 await this.loadKeyState();
@@ -255,14 +302,15 @@ function clientApp() {
                 const kp = await airgap.loadDeviceKey();
                 if (!kp) throw new Error('no device key — generate one first');
                 // The Pi's /pair endpoint is the canonical source of
-                // truth for the VIN — same value the SDK scans for
-                // over BLE AND the same value the car expects in the
-                // AAD's personalization tag. Don't trust the client's
-                // cfg.vin (cosmetic) for crypto.
+                // truth for the VIN — same value the SDK scans for over
+                // BLE AND the same value the car expects in the AAD's
+                // personalization tag. Refresh every call so a freshly-
+                // saved VIN works without a reconnect.
                 const pairInfo = await api.get('/pair');
                 if (!pairInfo?.vin) {
-                    throw new Error('Pi has no VIN configured — set one on /garage');
+                    throw new Error('Pi has no VIN configured — enter one in the VIN card above');
                 }
+                this.vin = pairInfo.vin;
                 const vin = pairInfo.vin;
 
                 session = await airgap.openDirectSession({

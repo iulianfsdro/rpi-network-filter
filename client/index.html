@@ -118,13 +118,14 @@
                             </div>
                         </div>
                         <div class="field">
-                            <label class="label">VIN (optional)</label>
-                            <input class="input mono" x-model="cfg.vin"
-                                   placeholder="5YJ3E1EA…">
+                            <label class="label">Nickname (optional)</label>
+                            <input class="input" x-model="cfg.nickname"
+                                   placeholder="e.g. Red Ferrari, Charlie's Tesla">
                             <div class="enrol-help">
-                                Cosmetic — shown in the corner of the Garage screen so you
-                                know which car this client speaks to. The Pi already knows
-                                the VIN from its own pairing setup.
+                                Display only — shows up in the corner of the Garage
+                                screen so you can tell which car this client speaks to.
+                                The crypto VIN is configured separately, fetched from
+                                the Pi after you connect.
                             </div>
                         </div>
                         <div class="form-row" style="gap:8px; margin-top:10px;">
@@ -148,18 +149,45 @@
                         <span class="client-bar-glyph"></span>
                         <span>airgap</span>
                         <span style="color:var(--fg-faint);">/</span>
-                        <em style="font-style:normal; color:var(--fg);">Garage</em>
+                        <em style="font-style:normal; color:var(--fg);"
+                            x-text="cfg.nickname || 'Garage'"></em>
                     </div>
                     <div class="client-bar-spacer"></div>
                     <span class="client-bar-status">
                         <span class="client-bar-status-dot"
-                              :class="state ? '' : 'warn'"></span>
-                        <span x-text="state ? 'BLE · paired' : 'connecting…'"></span>
+                              :class="vin ? '' : 'warn'"></span>
+                        <span x-text="vin ? ('BLE · ' + vin.slice(-6)) : 'no VIN'"></span>
                     </span>
                     <button class="btn-icon" @click="forget()" title="Forget this Pi">
                         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="2.2"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3 3l1.5 1.5M11.5 11.5L13 13M3 13l1.5-1.5M11.5 4.5L13 3"/></svg>
                     </button>
                 </div>
+
+                <!-- VIN setup card — shown only when the Pi has no VIN yet. -->
+                <template x-if="!vin">
+                    <div class="card" style="border:1px solid var(--warn); margin-bottom:14px;">
+                        <div class="card-head">
+                            <div>
+                                <div class="card-head-title" style="color:var(--warn);">VIN not configured</div>
+                                <div class="card-head-sub">The Pi needs your real 17-char Tesla VIN before any BLE session can open. It's used both to find the car's advertisement and as the AES-GCM personalization field.</div>
+                            </div>
+                        </div>
+                        <div class="card-body">
+                            <div class="form-row" style="gap:10px; align-items:center;">
+                                <input type="text" class="input mono" maxlength="17" minlength="17"
+                                       x-model="vinInput" placeholder="5YJ3E1EA1AAAA0001"
+                                       style="text-transform:uppercase; max-width:260px;">
+                                <button class="btn primary"
+                                        :disabled="vinInput.length !== 17 || savingVin"
+                                        @click="saveVin()"
+                                        x-text="savingVin ? 'Saving…' : 'Save VIN'"></button>
+                            </div>
+                            <div class="enrol-help" style="margin-top:8px;">
+                                Find it in the Tesla mobile app → vehicle → details, or on the lower-left of the windscreen.
+                            </div>
+                        </div>
+                    </div>
+                </template>
 
                 <!-- Top-level state -->
                 <div class="grid-3">
