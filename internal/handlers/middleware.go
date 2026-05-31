@@ -126,3 +126,38 @@ func GetBLEClient(r *http.Request) *services.TeslaClientToken {
 	tok, _ := r.Context().Value(clientContextKey).(*services.TeslaClientToken)
 	return tok
 }
+
+// BLECORS lets the standalone client (served from a different origin —
+// file://, http://localhost:PORT, or eventually a native shell) make
+// cross-origin requests to /api/ble. Without this every fetch is
+// blocked by the browser's same-origin policy.
+//
+// We allow ANY origin and ONLY the methods + headers we actually use.
+// That's safe because the resource itself is bearer-gated; a malicious
+// site can issue CORS requests to /api/ble all it wants, but without
+// a valid bearer (which is per-device, stored only in the legitimate
+// client's IndexedDB) the response is 401. The bearer model already
+// assumes a hostile public-internet path.
+//
+// OPTIONS preflight returns 204 immediately, BEFORE BLEBearerRequired
+// runs, because preflights are sent without the Authorization header
+// by design. If we let the bearer middleware see the OPTIONS it would
+// 401 and the browser would never send the real request.
+func BLECORS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		origin := r.Header.Get("Origin")
+		if origin == "" {
+			origin = "*"
+		}
+		w.Header().Set("Access-Control-Allow-Origin", origin)
+		w.Header().Set("Vary", "Origin")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+		w.Header().Set("Access-Control-Max-Age", "600")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}

@@ -95,6 +95,10 @@ func NewRouterWithFS(db *sql.DB, svc *services.Services, cfg config.Config, webF
 		// difference is the auth gate (BLEBearerRequired synthesises
 		// a "client:NAME" virtual user for audit attribution).
 		r.Route("/ble", func(r chi.Router) {
+			// CORS comes BEFORE bearer auth so OPTIONS preflights
+			// don't need a token. The bearer is still required on
+			// every real request — CORS is just browser plumbing.
+			r.Use(BLECORS)
 			r.Use(BLEBearerRequired(svc.TeslaToken))
 			r.Get("/pair", teslaH.PairingInfo)
 			r.Post("/pair/request", teslaH.RequestPairing)

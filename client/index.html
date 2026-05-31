@@ -1,0 +1,356 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>airgap — Tesla client</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="airgap.css">
+    <style>
+        /* The client is a single-page app with no rail or headbar — it's
+           a standalone view, not embedded in netfilterd's admin shell. */
+        body { overflow: auto; }
+        .client-shell {
+            max-width: 900px; margin: 0 auto;
+            padding: 36px 28px 80px;
+            min-height: 100vh;
+        }
+        @media (max-width: 600px) {
+            .client-shell { padding: 20px 16px 60px; }
+        }
+        .client-bar {
+            display: flex; align-items: center; gap: 12px;
+            margin-bottom: 28px;
+        }
+        .client-bar-mark {
+            font-size: 20px; font-weight: 600; letter-spacing: -0.02em;
+            display: flex; align-items: center; gap: 10px;
+        }
+        .client-bar-glyph { width: 20px; height: 20px; position: relative; }
+        .client-bar-glyph::before {
+            content: ""; position: absolute; inset: 0; border-radius: 3px;
+            background: var(--fg); clip-path: polygon(50% 0,100% 50%,50% 100%,0 50%);
+        }
+        .client-bar-glyph::after {
+            content: ""; position: absolute; inset: 6px; border-radius: 2px;
+            background: var(--bg); clip-path: polygon(50% 0,100% 50%,50% 100%,0 50%);
+        }
+        .client-bar-spacer { flex: 1; }
+        .client-bar-status {
+            display: inline-flex; align-items: center; gap: 7px;
+            font-size: 12px; color: var(--fg-dim);
+        }
+        .client-bar-status-dot {
+            width: 7px; height: 7px; border-radius: 50%;
+            background: var(--ok); box-shadow: 0 0 0 3px var(--ok-faint);
+        }
+        .client-bar-status-dot.warn { background: var(--warn); box-shadow: 0 0 0 3px var(--warn-faint); }
+        .client-bar-status-dot.danger { background: var(--danger); box-shadow: 0 0 0 3px var(--danger-faint); }
+        .client-bar .btn-icon { color: var(--fg-mute); }
+
+        .enrol-card { max-width: 520px; margin: 8vh auto 0; }
+        .enrol-card .card-body { padding: 26px 28px 26px; }
+        .enrol-help { color: var(--fg-mute); font-size: 12.5px; margin-top: 6px; line-height: 1.55; }
+        .enrol-help a { color: var(--fg-dim); }
+
+        .stat-tile {
+            background: var(--bg-elev); border-radius: var(--radius);
+            padding: 22px 24px; display: flex; flex-direction: column; gap: 8px;
+        }
+        .stat-tile-label { font-size: 12px; color: var(--fg-mute); }
+        .stat-tile-value { font-size: 30px; font-weight: 500; letter-spacing: -0.02em; color: var(--fg); line-height: 1; }
+        .stat-tile-value .unit { font-size: 13px; color: var(--fg-mute); font-weight: 400; margin-left: 6px; }
+
+        .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 14px; }
+        .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-bottom: 14px; }
+        @media (max-width: 720px) { .grid-2, .grid-3 { grid-template-columns: 1fr; } }
+
+        .row-wrap { display: flex; gap: 8px; flex-wrap: wrap; }
+        .meta { color: var(--fg-mute); font-size: 11.5px; }
+
+        [x-cloak] { display: none !important; }
+    </style>
+</head>
+<body>
+    <div class="client-shell" x-data="clientApp()" x-init="init()" x-cloak>
+
+        <!-- ── Enrolment screen ─────────────────────────────────── -->
+        <template x-if="screen === 'enrol'">
+            <div>
+                <div class="client-bar">
+                    <div class="client-bar-mark">
+                        <span class="client-bar-glyph"></span>
+                        <span>airgap</span>
+                    </div>
+                    <div class="client-bar-spacer"></div>
+                    <span style="font-size:12px; color:var(--fg-mute);">client v0</span>
+                </div>
+
+                <div class="card enrol-card">
+                    <div class="card-head">
+                        <div>
+                            <div class="card-head-title">Connect to your Pi</div>
+                            <div class="card-head-sub">Paste the API URL and bearer token from the Pi's <code>/settings</code>.</div>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <div class="field">
+                            <label class="label">API URL</label>
+                            <input class="input mono" x-model="cfg.api"
+                                   placeholder="https://pi.tail-XXXX.ts.net/api/ble">
+                            <div class="enrol-help">
+                                Funnel: <code>https://&lt;your-pi-host&gt;.ts.net/api/ble</code> ·
+                                LAN: <code>https://192.168.4.1:8443/api/ble</code>.
+                                Note the <code>/api/ble</code> suffix — without it the bearer
+                                won't reach the bearer-authed routes.
+                            </div>
+                        </div>
+                        <div class="field">
+                            <label class="label">Bearer token</label>
+                            <input type="password" class="input mono" x-model="cfg.token"
+                                   placeholder="…43 random base64url chars…">
+                            <div class="enrol-help">
+                                Issued at the Pi's <strong>Settings → BLE client tokens → Issue token</strong>.
+                                Stored in this device's <code>localStorage</code>, never sent anywhere
+                                except in the <code>Authorization: Bearer …</code> header to the URL above.
+                            </div>
+                        </div>
+                        <div class="field">
+                            <label class="label">VIN (optional)</label>
+                            <input class="input mono" x-model="cfg.vin"
+                                   placeholder="5YJ3E1EA…">
+                            <div class="enrol-help">
+                                Cosmetic — shown in the corner of the Garage screen so you
+                                know which car this client speaks to. The Pi already knows
+                                the VIN from its own pairing setup.
+                            </div>
+                        </div>
+                        <div class="form-row" style="gap:8px; margin-top:10px;">
+                            <button class="btn primary"
+                                    @click="connect()"
+                                    :disabled="busy || !cfg.api || !cfg.token"
+                                    x-text="busy ? 'Checking…' : 'Connect'"></button>
+                        </div>
+                        <div x-show="enrolError" class="protected-banner" style="margin-top:14px;"
+                             x-text="enrolError"></div>
+                    </div>
+                </div>
+            </div>
+        </template>
+
+        <!-- ── Garage screen ────────────────────────────────────── -->
+        <template x-if="screen === 'garage'">
+            <div>
+                <div class="client-bar">
+                    <div class="client-bar-mark">
+                        <span class="client-bar-glyph"></span>
+                        <span>airgap</span>
+                        <span style="color:var(--fg-faint);">/</span>
+                        <em style="font-style:normal; color:var(--fg);">Garage</em>
+                    </div>
+                    <div class="client-bar-spacer"></div>
+                    <span class="client-bar-status">
+                        <span class="client-bar-status-dot"
+                              :class="state ? '' : 'warn'"></span>
+                        <span x-text="state ? 'BLE · paired' : 'connecting…'"></span>
+                    </span>
+                    <button class="btn-icon" @click="forget()" title="Forget this Pi">
+                        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="2.2"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3 3l1.5 1.5M11.5 11.5L13 13M3 13l1.5-1.5M11.5 4.5L13 3"/></svg>
+                    </button>
+                </div>
+
+                <!-- Top-level state -->
+                <div class="grid-3">
+                    <div class="stat-tile">
+                        <div class="stat-tile-label">Battery</div>
+                        <div class="stat-tile-value">
+                            <span x-text="state?.battery?.soc ?? '—'"></span><span class="unit">%</span>
+                        </div>
+                        <div class="meta" x-text="state?.battery ? ('range ' + (state.battery.range_km != null ? state.battery.range_km + ' km' : '—')) : '—'"></div>
+                    </div>
+                    <div class="stat-tile">
+                        <div class="stat-tile-label">Climate</div>
+                        <div class="stat-tile-value">
+                            <span x-text="state?.climate?.inside_temp_c != null ? state.climate.inside_temp_c.toFixed(1) : '—'"></span><span class="unit">°C inside</span>
+                        </div>
+                        <div class="meta" x-text="state?.climate ? ('outside ' + (state.climate.outside_temp_c != null ? state.climate.outside_temp_c.toFixed(1) + '°C' : '—')) : '—'"></div>
+                    </div>
+                    <div class="stat-tile">
+                        <div class="stat-tile-label">Closures</div>
+                        <div class="stat-tile-value" style="font-size:18px; display:flex; gap:14px; align-items:baseline;">
+                            <span :style="locked ? 'color:var(--ok);' : 'color:var(--warn);'"
+                                  x-text="locked ? '🔒 locked' : '🔓 unlocked'"></span>
+                        </div>
+                        <div class="meta" x-text="vin ? ('VIN · ' + vin) : 'VIN not set'"></div>
+                    </div>
+                </div>
+
+                <!-- Locks + base actions -->
+                <div class="card">
+                    <div class="card-head">
+                        <div>
+                            <div class="card-head-title">Locks &amp; alerts</div>
+                            <div class="card-head-sub">Owner-key signed · arrives in ~1s</div>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <div class="row-wrap">
+                            <button class="btn" @click="cmd('lock')">Lock</button>
+                            <button class="btn" @click="cmd('unlock')">Unlock</button>
+                            <button class="btn ghost" @click="cmd('honk')">Honk</button>
+                            <button class="btn ghost" @click="cmd('flash-lights')">Flash lights</button>
+                            <button class="btn ghost" @click="cmd('wake')">Wake</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Climate -->
+                <div class="card">
+                    <div class="card-head">
+                        <div>
+                            <div class="card-head-title">Climate</div>
+                            <div class="card-head-sub">
+                                <span x-text="state?.climate?.is_on ? 'On' : 'Off'"></span> ·
+                                target <span x-text="state?.climate?.target_temp_c != null ? state.climate.target_temp_c.toFixed(1) + '°C' : '—'"></span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <div class="row-wrap" style="margin-bottom:14px;">
+                            <button class="btn" @click="cmd('climate-on')">Climate ON</button>
+                            <button class="btn" @click="cmd('climate-off')">Climate OFF</button>
+                            <button class="btn ghost" @click="cmd('defrost-on')">Defrost ON</button>
+                            <button class="btn ghost" @click="cmd('defrost-off')">Defrost OFF</button>
+                        </div>
+                        <div class="form-row" style="gap:10px; align-items:center;">
+                            <input type="number" class="input" min="15" max="28" step="0.5"
+                                   x-model.number="climateTarget"
+                                   style="max-width:140px;">
+                            <span class="meta">°C target</span>
+                            <button class="btn"
+                                    :disabled="!climateTarget || climateTarget < 15 || climateTarget > 28"
+                                    @click="cmdJSON('set-climate-temp', { temperature_c: Number(climateTarget) })">
+                                Set
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Closures -->
+                <div class="card">
+                    <div class="card-head">
+                        <div>
+                            <div class="card-head-title">Closures</div>
+                            <div class="card-head-sub">Front trunk · rear trunk · charge port</div>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <div class="row-wrap">
+                            <button class="btn ghost" @click="cmd('open-frunk')">Open frunk</button>
+                            <button class="btn ghost" @click="cmd('open-trunk')">Open trunk</button>
+                            <button class="btn ghost" @click="cmd('close-trunk')">Close trunk</button>
+                            <button class="btn ghost" @click="cmd('open-charge-port')">Open charge port</button>
+                            <button class="btn ghost" @click="cmd('close-charge-port')">Close charge port</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Charging -->
+                <div class="card">
+                    <div class="card-head">
+                        <div>
+                            <div class="card-head-title">Charging</div>
+                            <div class="card-head-sub">
+                                <span x-text="state?.battery?.charging_state ?? 'unknown'"></span> ·
+                                limit <span x-text="state?.battery?.charge_limit_soc ?? '—'"></span>%
+                            </div>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <div class="row-wrap" style="margin-bottom:14px;">
+                            <button class="btn" @click="cmd('start-charging')">Start charging</button>
+                            <button class="btn" @click="cmd('stop-charging')">Stop charging</button>
+                            <button class="btn ghost" @click="cmd('charge-standard-range')">Standard range</button>
+                            <button class="btn ghost" @click="cmd('charge-max-range')">Max range</button>
+                        </div>
+                        <div class="form-row" style="gap:10px; align-items:center;">
+                            <input type="number" class="input" min="50" max="100" step="1"
+                                   x-model.number="chargeLimit"
+                                   style="max-width:140px;">
+                            <span class="meta">% limit</span>
+                            <button class="btn"
+                                    :disabled="!chargeLimit || chargeLimit < 50 || chargeLimit > 100"
+                                    @click="cmdJSON('set-charge-limit', { percent: Number(chargeLimit) })">
+                                Set
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Sentry -->
+                <div class="card">
+                    <div class="card-head">
+                        <div>
+                            <div class="card-head-title">Sentry mode</div>
+                            <div class="card-head-sub">
+                                <span x-text="state?.sentry?.is_on ? 'Armed' : 'Idle'"></span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <div class="row-wrap">
+                            <button class="btn" @click="cmd('sentry-on')">Sentry ON</button>
+                            <button class="btn" @click="cmd('sentry-off')">Sentry OFF</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Activity strip -->
+                <div class="card">
+                    <div class="card-head">
+                        <div>
+                            <div class="card-head-title">Recent commands</div>
+                            <div class="card-head-sub">
+                                Last <span x-text="log.length"></span> entries — audit trail from the Pi
+                            </div>
+                        </div>
+                        <div class="card-head-spacer"></div>
+                        <button class="btn-icon" @click="refresh('full')" title="Refresh">
+                            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M14 8a6 6 0 1 0-2 4.5"/><path d="M14 3v4h-4"/></svg>
+                        </button>
+                    </div>
+                    <div class="card-body" style="padding:0;">
+                        <table class="tbl">
+                            <thead>
+                                <tr><th style="width:180px;">When</th><th>Command</th><th style="width:80px;">Result</th></tr>
+                            </thead>
+                            <tbody>
+                                <template x-for="r in log" :key="r.at">
+                                    <tr>
+                                        <td class="cell-mac" x-text="new Date(r.at).toLocaleString()"></td>
+                                        <td class="cell-mac" x-text="r.command"></td>
+                                        <td>
+                                            <span class="badge" :class="r.succeeded ? 'success' : 'danger'"
+                                                  x-text="r.succeeded ? 'ok' : 'err'"></span>
+                                        </td>
+                                    </tr>
+                                </template>
+                                <template x-if="log.length === 0">
+                                    <tr><td colspan="3" style="text-align:center; color:var(--fg-mute); padding:22px;">No commands yet.</td></tr>
+                                </template>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </template>
+
+        <div id="toast-container"></div>
+    </div>
+
+    <script src="alpine.min.js" defer></script>
+    <script src="app.js"></script>
+</body>
+</html>
