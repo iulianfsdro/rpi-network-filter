@@ -142,16 +142,47 @@ async function openDirectSession({ api, vin, deviceKeyPair, domain }) {
             { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']
         );
 
-        // ── TODO(security): verify SessionInfo HMAC tag here. ──
-        // Without it, a malicious byte-forwarder could substitute
-        // its own pubkey + matching session_info_tag and the rest
-        // of this session would be MITM-able. The HMAC is computed
-        // over a metadata block: TAG_SIGNATURE_TYPE=HMAC,
-        // TAG_PERSONALIZATION=VIN, TAG_CHALLENGE=challenge, with the
-        // encoded SessionInfo bytes as trailing — using
-        // subkey("session info") = HMAC-SHA256(keyBytes, "session info").
-        // helper already in crypto.js (MetadataBlockBuilder.hmac).
-        console.warn('[airgap] SessionInfo HMAC verification not yet wired — see TODO in session.js');
+        // Verify the SessionInfo HMAC tag. The car HMAC'd the
+        // SessionInfo bytes (which carry its ephemeral pubkey)
+        // using subkey("session info"), derived from the SAME
+        // shared secret only the car and we can derive. So tag
+        // match proves three things at once: SessionInfo came from
+        // the car (not a MITM byte-forwarder), our pubkey is in
+        // the car's keychain, and the derived session key on both
+        // sides matches.
+        //
+        // Without this check, a compromised Pi could substitute its
+        // own ephemeral pubkey + a matching HMAC it computed under
+        // a key it knows, and decrypt every subsequent command.
+        const receivedTag =
+            respMsg.signatureData?.sessionInfoTag?.tag ||
+            respMsg.signatureData?.session_info_tag?.tag;
+        if (!receivedTag || receivedTag.length === 0) {
+            throw new Error('SessionInfo response missing signatureData.sessionInfoTag.tag — cannot verify');
+        }
+        const subkey = await airgap.hmacSubkey(keyBytes, 'session info');
+        const verifyMeta = new airgap.MetadataBlockBuilder();
+        verifyMeta.add(airgap.TAG.SIGNATURE_TYPE,  new Uint8Array([airgap.SIGNATURE_TYPE.HMAC]));
+        verifyMeta.add(airgap.TAG.PERSONALIZATION, new TextEncoder().encode(vin));
+        verifyMeta.add(airgap.TAG.CHALLENGE,       challenge);
+        const expectedTag = await verifyMeta.hmac(subkey, sessionInfoBytes);
+
+        if (expectedTag.length !== receivedTag.length) {
+            throw new Error(`SessionInfo HMAC length mismatch: expected ${expectedTag.length}, received ${receivedTag.length}`);
+        }
+        // Branch-free comparison — both sides are 32 bytes of HMAC
+        // output so timing leaks are bounded, but no reason not to
+        // do it the right way.
+        let diff = 0;
+        for (let i = 0; i < expectedTag.length; i++) {
+            diff |= expectedTag[i] ^ receivedTag[i];
+        }
+        if (diff !== 0) {
+            console.error('[airgap] HMAC mismatch — expected:', airgap.bytesToHex(expectedTag));
+            console.error('[airgap] HMAC mismatch — received:', airgap.bytesToHex(receivedTag));
+            throw new Error('SessionInfo HMAC verification FAILED — possible MITM, refusing to continue');
+        }
+        console.log('[airgap] SessionInfo HMAC ✓ (car authenticated)');
 
         return {
             sessionId,

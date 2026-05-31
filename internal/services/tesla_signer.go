@@ -18,12 +18,11 @@ package services
 import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
-	"crypto/rand"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"github.com/teslamotors/vehicle-command/pkg/protocol"
 )
@@ -73,30 +72,28 @@ func NewLocalFileSigner(path string) *localFileSigner {
 	return &localFileSigner{path: path}
 }
 
-// Key loads the keyfile if present, generates + writes one otherwise.
-// The file is SEC1 PEM ("EC PRIVATE KEY"), the same shape the SDK's
-// SavePrivateKey produces — so protocol.LoadPrivateKey reads it back
-// without ceremony.
+// ErrPiKeyDisabled is returned by Key() when no key file exists on
+// disk. V4.4 Phase 4: the Pi must never auto-generate a signing key
+// because the architecture has the operator's device own its own
+// non-extractable WebCrypto P-256 keypair, and command crypto runs
+// entirely on the client through /api/ble/sessions.
+//
+// Handlers that surface this error should redirect users to the
+// client app rather than retrying.
+var ErrPiKeyDisabled = errors.New("Pi-resident BLE key is disabled — use the client app's /api/ble/sessions path instead")
+
+// Key loads the keyfile if present. **V4.4 Phase 4: no longer
+// auto-generates.** Pre-V4.4 deployments may still have a file on
+// disk and this method continues to serve them. New installs (and
+// installs where the operator has wiped the file) return
+// ErrPiKeyDisabled — the client owns the long-term key from then on.
 func (s *localFileSigner) Key() (protocol.ECDHPrivateKey, error) {
 	if _, err := os.Stat(s.path); err == nil {
 		return protocol.LoadPrivateKey(s.path)
+	} else if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("stat key file: %w", err)
 	}
-	if err := os.MkdirAll(filepath.Dir(s.path), 0o700); err != nil {
-		return nil, fmt.Errorf("mkdir key dir: %w", err)
-	}
-	ecKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		return nil, fmt.Errorf("generate P-256 key: %w", err)
-	}
-	der, err := x509.MarshalECPrivateKey(ecKey)
-	if err != nil {
-		return nil, fmt.Errorf("marshal EC key: %w", err)
-	}
-	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der})
-	if err := os.WriteFile(s.path, pemBytes, 0o600); err != nil {
-		return nil, fmt.Errorf("write key: %w", err)
-	}
-	return protocol.LoadPrivateKey(s.path)
+	return nil, ErrPiKeyDisabled
 }
 
 // PublicKeyPEM returns the matching public key as a PKIX-encoded PEM
