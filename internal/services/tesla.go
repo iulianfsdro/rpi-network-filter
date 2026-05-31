@@ -27,23 +27,15 @@ package services
 import (
 	"context"
 	"crypto/ecdh"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
-	"crypto/x509"
 	"database/sql"
-	"encoding/pem"
 	"errors"
 	"fmt"
 	"log"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/teslamotors/vehicle-command/pkg/connector/ble"
-	"github.com/teslamotors/vehicle-command/pkg/protocol"
 	"github.com/teslamotors/vehicle-command/pkg/protocol/protobuf/carserver"
 	keysproto "github.com/teslamotors/vehicle-command/pkg/protocol/protobuf/keys"
 	universal "github.com/teslamotors/vehicle-command/pkg/protocol/protobuf/universalmessage"
@@ -232,10 +224,10 @@ type LocationSnapshot struct {
 // TeslaService is the singleton wrapping every BLE operation. Held by
 // the composition root in services.Services.Tesla.
 type TeslaService struct {
-	db       *sql.DB
-	audit    *AuditService
-	keyPath  string
-	adapter  string
+	db      *sql.DB
+	audit   *AuditService
+	signer  TeslaSigner
+	adapter string
 
 	// bleMu serialises every BLE adapter operation. Linux can only host
 	// one HCI client at a time and the SDK's session handshake isn't
@@ -290,7 +282,7 @@ func NewTeslaService(db *sql.DB, audit *AuditService) *TeslaService {
 	return &TeslaService{
 		db:                db,
 		audit:             audit,
-		keyPath:           teslaKeyPath,
+		signer:            NewLocalFileSigner(teslaKeyPath),
 		adapter:           teslaBLEAdapter,
 		closureAssertions: make(map[string]closureAssertion),
 	}
@@ -393,53 +385,11 @@ func (s *TeslaService) applyClosureAssertions(snap *VehicleSnapshot) {
 //
 // Generating writes the private key to teslaKeyPath, mode 0600. The
 // directory is created with mode 0700 if missing.
+// PublicKeyPEM delegates to the configured TeslaSigner. The handler
+// path is unchanged; whether the key lives on this Pi (localFileSigner)
+// or on the client (future remoteSigner) is invisible from here.
 func (s *TeslaService) PublicKeyPEM() (string, error) {
-	priv, err := s.loadOrGenerateKey()
-	if err != nil {
-		return "", err
-	}
-	pubBytes := priv.PublicBytes()
-	if len(pubBytes) == 0 {
-		return "", fmt.Errorf("private key produced empty public bytes")
-	}
-	x, y := elliptic.Unmarshal(elliptic.P256(), pubBytes)
-	if x == nil {
-		return "", fmt.Errorf("public key bytes are not a valid P-256 point")
-	}
-	pubEC := &ecdsa.PublicKey{Curve: elliptic.P256(), X: x, Y: y}
-	der, err := x509.MarshalPKIXPublicKey(pubEC)
-	if err != nil {
-		return "", fmt.Errorf("marshal PKIX: %w", err)
-	}
-	return string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})), nil
-}
-
-// loadOrGenerateKey hides the SDK's split between LoadPrivateKey
-// (works on PEM files) and key generation (lives in the internal
-// authentication package). We generate a vanilla P-256 ECDSA key with
-// crypto/ecdsa and write it as SEC1 PEM — the same shape the SDK's
-// SavePrivateKey produces — so protocol.LoadPrivateKey reads it on the
-// next call.
-func (s *TeslaService) loadOrGenerateKey() (protocol.ECDHPrivateKey, error) {
-	if _, err := os.Stat(s.keyPath); err == nil {
-		return protocol.LoadPrivateKey(s.keyPath)
-	}
-	if err := os.MkdirAll(filepath.Dir(s.keyPath), 0o700); err != nil {
-		return nil, fmt.Errorf("mkdir key dir: %w", err)
-	}
-	ecKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		return nil, fmt.Errorf("generate P-256 key: %w", err)
-	}
-	der, err := x509.MarshalECPrivateKey(ecKey)
-	if err != nil {
-		return nil, fmt.Errorf("marshal EC key: %w", err)
-	}
-	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der})
-	if err := os.WriteFile(s.keyPath, pemBytes, 0o600); err != nil {
-		return nil, fmt.Errorf("write key: %w", err)
-	}
-	return protocol.LoadPrivateKey(s.keyPath)
+	return s.signer.PublicKeyPEM()
 }
 
 // IsPaired returns true if the tesla_pairing row says we have a
@@ -545,7 +495,7 @@ func (s *TeslaService) ConfirmPairing(ctx context.Context) error {
 // authentication.ECDHPrivateKey (interface); we extract the SEC1
 // public bytes and re-marshal.
 func (s *TeslaService) publicKeyECDH() (*ecdh.PublicKey, error) {
-	priv, err := s.loadOrGenerateKey()
+	priv, err := s.signer.Key()
 	if err != nil {
 		return nil, err
 	}
@@ -570,7 +520,7 @@ func (s *TeslaService) sendUnauthenticated(parent context.Context, vin string, f
 	s.bleMu.Lock()
 	defer s.bleMu.Unlock()
 
-	priv, err := s.loadOrGenerateKey()
+	priv, err := s.signer.Key()
 	if err != nil {
 		return fmt.Errorf("load key: %w", err)
 	}
@@ -1439,7 +1389,7 @@ func (s *TeslaService) withSession(parent context.Context, vin string, domains [
 	s.bleMu.Lock()
 	defer s.bleMu.Unlock()
 
-	priv, err := s.loadOrGenerateKey()
+	priv, err := s.signer.Key()
 	if err != nil {
 		return fmt.Errorf("load key: %w", err)
 	}
