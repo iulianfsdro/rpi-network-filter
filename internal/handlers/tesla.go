@@ -39,6 +39,7 @@ func decodeJSON(r *http.Request, v any) error {
 type TeslaHandler struct {
 	tesla    *services.TeslaService
 	tokens   *services.TeslaTokenService
+	bleSess  *services.BLESessionService
 	audit    *services.AuditService
 	renderer *Renderer
 }
@@ -47,6 +48,7 @@ func NewTeslaHandler(svc *services.Services, renderer *Renderer) *TeslaHandler {
 	return &TeslaHandler{
 		tesla:    svc.Tesla,
 		tokens:   svc.TeslaToken,
+		bleSess:  svc.BLESession,
 		audit:    svc.Audit,
 		renderer: renderer,
 	}

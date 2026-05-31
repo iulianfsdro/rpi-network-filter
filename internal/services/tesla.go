@@ -551,6 +551,49 @@ func (s *TeslaService) publicKeyECDH() (*ecdh.PublicKey, error) {
 	return ecdh.P256().NewPublicKey(pubBytes)
 }
 
+// AcquireBLEForVIN scans for the given VIN, opens a raw BLE connection,
+// and holds bleMu for the connection's lifetime. The returned release
+// closure closes the connection AND releases the adapter mutex; the
+// caller MUST eventually invoke it (typically via defer) — otherwise
+// every subsequent BLE operation on this Pi blocks forever.
+//
+// V4.4 Phase 3b. This is the entry point for the byte-forwarder API:
+// BLESessionService holds the connection across many client requests
+// and exposes a thin layer that fans Send/Receive to and from HTTP.
+// The Pi never inspects the bytes — they're protobuf RoutableMessages
+// that flow through opaquely.
+func (s *TeslaService) AcquireBLEForVIN(ctx context.Context, vin string) (*ble.Connection, func(), error) {
+	if err := initAdapter(s.adapter); err != nil {
+		return nil, nil, fmt.Errorf("BLE adapter init: %w", err)
+	}
+	s.bleMu.Lock()
+
+	scanCtx, scanCancel := context.WithTimeout(ctx, teslaScanTimeout)
+	defer scanCancel()
+	beacon, err := ble.ScanVehicleBeacon(scanCtx, vin)
+	if err != nil {
+		s.bleMu.Unlock()
+		return nil, nil, fmt.Errorf("scan %s: %w", vin, err)
+	}
+	conn, err := ble.NewConnectionFromScanResult(scanCtx, vin, beacon)
+	if err != nil {
+		s.bleMu.Unlock()
+		return nil, nil, fmt.Errorf("BLE connect %s: %w", vin, err)
+	}
+	release := func() {
+		conn.Close()
+		s.bleMu.Unlock()
+	}
+	return conn, release, nil
+}
+
+// RequireVIN exposes the configured VIN to callers outside this file
+// (the BLE session service uses it when the caller doesn't pass one
+// in the request body). Returns the VIN or an error if none is set.
+func (s *TeslaService) RequireVIN() (string, error) {
+	return s.requireVIN()
+}
+
 // sendUnauthenticated is withVCSEC's sibling for operations that must
 // NOT start a signed session — only add-key-request today. It opens a
 // fresh BLE connection, calls car.Connect (just the transport

@@ -21,9 +21,10 @@ type Services struct {
 	Filter     *FilterService
 	Spoof      *SpoofService
 	SNIProxy   *SNIProxyService
-	Tesla      *TeslaService
-	TeslaToken *TeslaTokenService
-	Remote     *RemoteService
+	Tesla       *TeslaService
+	TeslaToken  *TeslaTokenService
+	BLESession  *BLESessionService
+	Remote      *RemoteService
 }
 
 func New(db *sql.DB, exec *executor.Executor, cfg config.Config) *Services {
@@ -31,6 +32,7 @@ func New(db *sql.DB, exec *executor.Executor, cfg config.Config) *Services {
 	trafficLog := NewTrafficLogService(db)
 	filter := NewFilterService(db)
 	network := NewNetworkService(db, cfg)
+	tesla := NewTeslaService(db, audit)
 	return &Services{
 		Auth:       NewAuthService(db),
 		Network:    network,
@@ -44,8 +46,9 @@ func New(db *sql.DB, exec *executor.Executor, cfg config.Config) *Services {
 		Filter:     filter,
 		Spoof:      NewSpoofService(cfg, exec),
 		SNIProxy:   NewSNIProxyService(cfg, db, trafficLog),
-		Tesla:      NewTeslaService(db, audit),
+		Tesla:      tesla,
 		TeslaToken: NewTeslaTokenService(db),
+		BLESession: NewBLESessionService(tesla),
 		Remote:     NewRemoteService(),
 	}
 }

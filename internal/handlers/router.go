@@ -106,6 +106,13 @@ func NewRouterWithFS(db *sql.DB, svc *services.Services, cfg config.Config, webF
 			r.Get("/state", teslaH.State)
 			r.Get("/log", teslaH.CommandLog)
 			r.Post("/cmd/{name}", teslaH.Command)
+
+			// Raw byte forwarder — Phase 3b. Open a session, exchange
+			// opaque RoutableMessage bytes both ways, close. The Pi
+			// never inspects or decrypts payloads.
+			r.Post("/sessions", teslaH.OpenBLESession)
+			r.Post("/sessions/{id}/exchange", teslaH.ExchangeBLE)
+			r.Delete("/sessions/{id}", teslaH.CloseBLESession)
 		})
 
 		r.Group(func(r chi.Router) {
