@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+    <meta charset="utf-8">
+    <title>crypto-test — airgap</title>
+    <link rel="stylesheet" href="airgap.css">
+    <style>
+        body { overflow: auto; padding: 36px 28px 80px; max-width: 900px; margin: 0 auto; }
+        h1 { font-size: 30px; letter-spacing: -0.03em; margin: 0 0 6px; }
+        .sub { color: var(--fg-mute); font-size: 13px; margin-bottom: 28px; }
+        .vector {
+            background: var(--bg-elev); border-radius: var(--radius);
+            padding: 18px 22px; margin-bottom: 14px;
+            font-family: "JetBrains Mono", ui-monospace, monospace;
+            font-size: 11.5px; line-height: 1.6;
+        }
+        .vector .label { color: var(--fg-mute); }
+        .vector .val { color: var(--fg); word-break: break-all; }
+        .vector .ok  { color: var(--ok); }
+        .vector .err { color: var(--danger); }
+        .case-head { font-size: 14px; color: var(--fg); font-weight: 500; margin-bottom: 10px; display: flex; gap: 10px; align-items: baseline; }
+        .case-head .badge { padding: 2px 10px; border-radius: 100px; font-size: 11px; font-weight: 500; }
+        .case-head .badge.pass { background: var(--ok-faint); color: var(--ok); }
+        .case-head .badge.fail { background: var(--danger-faint); color: var(--danger); }
+        .case-head .badge.pending { background: var(--bg-elev-2); color: var(--fg-mute); }
+    </style>
+</head>
+<body>
+    <h1>airgap crypto-test</h1>
+    <p class="sub">
+        Runs vehicle-command's own ECDH / KDF test vectors through the WebCrypto port.
+        Each PASS means the TypeScript output is bit-identical to the Go SDK's.
+        Reload the page to re-run.
+    </p>
+
+    <div id="results"></div>
+
+    <script src="crypto.js"></script>
+    <script>
+        // ── Test vectors from
+        //     vehicle-command/internal/authentication/ecdh_test.go ──
+        //
+        // The vehicle (us) holds privateKey d. The phone is the
+        // counterpart; its public key is supplied as a raw SEC1
+        // uncompressed point. ScalarMult(myPriv, peerPub).X gives
+        // back correctSharedSecret. SHA1(correctSharedSecret)[:16] is
+        // the AES-GCM session key the SDK would use.
+        //
+        // d_jwk / x_jwk / y_jwk are the same scalar + derived public
+        // point, base64url-no-padding encoded — the form WebCrypto's
+        // importKey('jwk', ...) consumes for P-256 private keys.
+        const D_JWK = "UmD41hE4ddhvjuj-o0DfH_tAxli1RV6MM9eXxTpBr9M";
+        const X_JWK = "f5hMHstJB56mM_8mVjs0uVkWxY6xQDFSxAo03_NWQmU";
+        const Y_JWK = "-D_stR0mVCzfq7AUAikz19TS2cgFRyUFy7TRoPF6yXY";
+
+        const PHONE_PUBKEY_HEX =
+            "04" +
+            "07fb60b65b94e0de4a954c53be10003d9e69918dedfda5f4e9efb9ebd8c5bd67" +
+            "2a53991c4068865d5fb44f97f6cecf8398f261dd1d7bc69be676afdc8ffacbcc";
+
+        const EXPECTED_SHARED_SECRET_HEX =
+            "0072d5b815207a04f0c795fba0ba9e8add3f1f57148c51fface22ca15e6fd845";
+
+        // Each case is its own renderer + checker. Renders the
+        // inputs, runs the check, prints the actual + expected bytes,
+        // flips the badge.
+        const results = document.getElementById('results');
+
+        function card(title) {
+            const el = document.createElement('div');
+            el.className = 'vector';
+            el.innerHTML = `
+                <div class="case-head">
+                    <span>${title}</span>
+                    <span class="badge pending">running…</span>
+                </div>
+                <div class="body"></div>
+            `;
+            results.appendChild(el);
+            return {
+                pass(html) {
+                    el.querySelector('.badge').textContent = 'PASS';
+                    el.querySelector('.badge').className = 'badge pass';
+                    el.querySelector('.body').innerHTML = html;
+                },
+                fail(html) {
+                    el.querySelector('.badge').textContent = 'FAIL';
+                    el.querySelector('.badge').className = 'badge fail';
+                    el.querySelector('.body').innerHTML = html;
+                },
+            };
+        }
+
+        function row(label, val, klass) {
+            return `<div><span class="label">${label}:</span> <span class="val ${klass||''}">${val}</span></div>`;
+        }
+
+        // ── Case 1: ECDH shared X matches SDK vector ──
+        (async () => {
+            const c = card('ECDH(my_d, phone_pub).X');
+            try {
+                const myPriv = await crypto.subtle.importKey(
+                    'jwk',
+                    { kty: 'EC', crv: 'P-256', d: D_JWK, x: X_JWK, y: Y_JWK, ext: false },
+                    { name: 'ECDH', namedCurve: 'P-256' },
+                    false, ['deriveBits']
+                );
+                const peerPubBytes = airgap.hexToBytes(PHONE_PUBKEY_HEX);
+                const peerPub = await airgap.importPeerPubkey(peerPubBytes);
+                const sharedBuf = await crypto.subtle.deriveBits(
+                    { name: 'ECDH', public: peerPub }, myPriv, 256
+                );
+                const actualHex = airgap.bytesToHex(new Uint8Array(sharedBuf));
+                const ok = actualHex === EXPECTED_SHARED_SECRET_HEX;
+                const html = row('expected', EXPECTED_SHARED_SECRET_HEX) +
+                             row('actual  ', actualHex, ok ? 'ok' : 'err');
+                if (ok) c.pass(html); else c.fail(html);
+            } catch (e) {
+                c.fail(`<div class="err">threw: ${e.message || e}</div>`);
+            }
+        })();
+
+        // ── Case 2: KDF (SHA-1 of shared, take first 16 bytes) ──
+        (async () => {
+            const c = card('KDF: SHA-1(shared)[:16] = AES-GCM session key');
+            try {
+                const myPriv = await crypto.subtle.importKey(
+                    'jwk',
+                    { kty: 'EC', crv: 'P-256', d: D_JWK, x: X_JWK, y: Y_JWK, ext: false },
+                    { name: 'ECDH', namedCurve: 'P-256' },
+                    false, ['deriveBits']
+                );
+                const peerPub = await airgap.importPeerPubkey(airgap.hexToBytes(PHONE_PUBKEY_HEX));
+                const actualKey = await airgap.deriveSessionKeyMaterial(myPriv, peerPub);
+
+                // Compute the expected key independently:
+                // SHA-1(EXPECTED_SHARED_SECRET)[:16].
+                const expectedShared = airgap.hexToBytes(EXPECTED_SHARED_SECRET_HEX);
+                const expectedDigest = await crypto.subtle.digest('SHA-1', expectedShared);
+                const expectedKey = new Uint8Array(expectedDigest).slice(0, 16);
+
+                const actualHex = airgap.bytesToHex(actualKey);
+                const expectedHex = airgap.bytesToHex(expectedKey);
+                const ok = actualHex === expectedHex;
+                const html =
+                    row('expected', expectedHex) +
+                    row('actual  ', actualHex, ok ? 'ok' : 'err');
+                if (ok) c.pass(html); else c.fail(html);
+            } catch (e) {
+                c.fail(`<div class="err">threw: ${e.message || e}</div>`);
+            }
+        })();
+
+        // ── Case 3: importPeerPubkey rejects malformed input ──
+        (async () => {
+            const c = card('importPeerPubkey input validation');
+            const cases = [
+                { bytes: new Uint8Array(0),         expect: 'reject empty' },
+                { bytes: new Uint8Array(32),        expect: 'reject 32 bytes' },
+                { bytes: new Uint8Array(65),        expect: 'reject 65 bytes with 0x00 prefix' },
+                {
+                    bytes: (() => { const b = new Uint8Array(65); b[0] = 0x05; return b; })(),
+                    expect: 'reject 65 bytes with 0x05 prefix',
+                },
+            ];
+            const lines = [];
+            let failed = false;
+            for (const tc of cases) {
+                try {
+                    await airgap.importPeerPubkey(tc.bytes);
+                    lines.push(row(tc.expect, '✗ accepted (BAD)', 'err'));
+                    failed = true;
+                } catch (e) {
+                    lines.push(row(tc.expect, '✓ rejected: ' + e.message, 'ok'));
+                }
+            }
+            if (!failed) c.pass(lines.join('')); else c.fail(lines.join(''));
+        })();
+
+        // ── Case 4: deriveSessionKey returns an AES-GCM key that
+        //     actually encrypts + decrypts a roundtrip. (Sanity:
+        //     proves the importKey wrapping path works.)
+        (async () => {
+            const c = card('AES-GCM round-trip on derived key');
+            try {
+                const myPriv = await crypto.subtle.importKey(
+                    'jwk',
+                    { kty: 'EC', crv: 'P-256', d: D_JWK, x: X_JWK, y: Y_JWK, ext: false },
+                    { name: 'ECDH', namedCurve: 'P-256' },
+                    false, ['deriveBits']
+                );
+                const peerPub = await airgap.importPeerPubkey(airgap.hexToBytes(PHONE_PUBKEY_HEX));
+                const sessionKey = await airgap.deriveSessionKey(myPriv, peerPub);
+
+                const nonce = crypto.getRandomValues(new Uint8Array(12));
+                const plaintext = new TextEncoder().encode('hello tesla');
+                const aad = new TextEncoder().encode('test-aad');
+                const ct = new Uint8Array(await crypto.subtle.encrypt(
+                    { name: 'AES-GCM', iv: nonce, additionalData: aad }, sessionKey, plaintext
+                ));
+                const pt = new Uint8Array(await crypto.subtle.decrypt(
+                    { name: 'AES-GCM', iv: nonce, additionalData: aad }, sessionKey, ct
+                ));
+                const decoded = new TextDecoder().decode(pt);
+                const ok = decoded === 'hello tesla';
+                const html = row('plaintext', 'hello tesla') +
+                             row('ciphertext+tag', airgap.bytesToHex(ct).slice(0, 80) + '…') +
+                             row('decoded', decoded, ok ? 'ok' : 'err');
+                if (ok) c.pass(html); else c.fail(html);
+            } catch (e) {
+                c.fail(`<div class="err">threw: ${e.message || e}</div>`);
+            }
+        })();
+    </script>
+</body>
+</html>
