@@ -120,6 +120,62 @@
         </div>
     </template>
 
+    <!-- ── State C-extra: BLE Funnel toggle ─────────────────────── -->
+    <template x-if="status.authenticated">
+        <div class="card">
+            <div class="card-head">
+                <div>
+                    <div class="card-head-title">Expose <code style="font-size:14px;">/api/ble</code> publicly</div>
+                    <div class="card-head-sub">
+                        Tailscale Funnel — the byte-forwarder API reachable from anywhere
+                        without installing Tailscale on the client. Bearer-token auth only.
+                    </div>
+                </div>
+                <span class="card-head-spacer"></span>
+                <span class="badge" :class="status.ble_funnel ? 'success' : 'muted'"
+                      x-text="status.ble_funnel ? 'PUBLIC' : 'off'"></span>
+            </div>
+            <div class="card-body">
+                <p style="color:var(--fg-dim); margin:0 0 12px;">
+                    Only <code>/api/ble/*</code> is exposed — the admin web UI
+                    (<code>/garage</code>, <code>/settings</code>, <code>/traffic</code>)
+                    stays Tailscale-only.
+                    Public requests terminate TLS at Tailscale's edge with a Let's Encrypt cert,
+                    travel over WireGuard back to this Pi, and re-issue against
+                    <code>https://localhost:8443/api/ble</code>.
+                    Each external client needs a bearer token issued from
+                    <a href="/settings"><strong>Settings → BLE client tokens</strong></a>.
+                </p>
+                <p style="color:var(--fg-mute); font-size:12.5px; margin:0 0 14px;">
+                    Prerequisites: Funnel must be enabled on your tailnet under
+                    <a href="https://login.tailscale.com/admin/dns/feature-flags" target="_blank" rel="noopener">
+                    admin → DNS → Feature flags</a>. One-time, free for personal use.
+                </p>
+
+                <template x-if="status.ble_funnel">
+                    <div class="stat-row" style="border-bottom:none;">
+                        <span>Public URL</span>
+                        <strong class="mono" x-text="status.ble_funnel_url || '—'"></strong>
+                    </div>
+                </template>
+
+                <div class="form-row" style="margin-top:16px; gap:8px;">
+                    <button class="btn"
+                            x-show="!status.ble_funnel"
+                            @click="enableFunnel()" :disabled="busy">
+                        <span x-text="busy ? 'Enabling…' : 'Expose /api/ble publicly'"></span>
+                    </button>
+                    <button class="btn danger"
+                            x-show="status.ble_funnel"
+                            @click="disableFunnel()" :disabled="busy">
+                        <span x-text="busy ? 'Hiding…' : 'Hide from public internet'"></span>
+                    </button>
+                </div>
+                <div x-show="funnelError" class="form-error" x-text="funnelError"></div>
+            </div>
+        </div>
+    </template>
+
     <!-- Phone setup hint always-on -->
     <div class="card">
         <div class="card-head">
@@ -148,12 +204,13 @@
 <script>
 function remoteApp() {
     return {
-        status: { installed:false, daemon_active:false, authenticated:false, backend_state:'', tailnet_hostname:'', tailnet_ipv4:'' },
+        status: { installed:false, daemon_active:false, authenticated:false, backend_state:'', tailnet_hostname:'', tailnet_ipv4:'', ble_funnel:false, ble_funnel_url:'' },
         authKey: '',
         busy: false,
         installError: '',
         connectError: '',
         logoutError: '',
+        funnelError: '',
 
         async init() {
             await this.loadStatus();
@@ -190,6 +247,30 @@ function remoteApp() {
                 setTimeout(() => this.loadStatus(), 2000);
             } catch (e) {
                 this.connectError = e.message || 'connect failed';
+            } finally {
+                this.busy = false;
+            }
+        },
+        async enableFunnel() {
+            this.funnelError = '';
+            this.busy = true;
+            try {
+                this.status = await api.post('/api/remote/funnel/ble/enable', {});
+                notify('Funnel enabled — /api/ble is public', 'success');
+            } catch (e) {
+                this.funnelError = e.message || 'funnel enable failed';
+            } finally {
+                this.busy = false;
+            }
+        },
+        async disableFunnel() {
+            this.funnelError = '';
+            this.busy = true;
+            try {
+                this.status = await api.post('/api/remote/funnel/ble/disable', {});
+                notify('Funnel disabled — /api/ble is tailnet-only again', 'success');
+            } catch (e) {
+                this.funnelError = e.message || 'funnel disable failed';
             } finally {
                 this.busy = false;
             }

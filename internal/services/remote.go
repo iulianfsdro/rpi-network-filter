@@ -67,7 +67,29 @@ type RemoteStatus struct {
 	// of the tailnet on. UI shows it as a fallback in case MagicDNS
 	// isn't configured (rare).
 	TailnetIPv4 string `json:"tailnet_ipv4"`
+
+	// BLEFunnel is true if Tailscale Funnel currently exposes
+	// /api/ble on the public internet. Funnel terminates TLS at
+	// Tailscale's globally-distributed edge with a Let's Encrypt
+	// cert, and tunnels the request back to this Pi over WireGuard
+	// before re-issuing it against localhost:8443 (self-signed,
+	// accepted via the `https+insecure://` upstream form).
+	//
+	// Only /api/ble/* is exposed via Funnel — the admin web UI
+	// (/login, /traffic, /settings, etc.) stays Tailscale-only. The
+	// path-based split is the load-bearing safety property.
+	BLEFunnel bool `json:"ble_funnel"`
+
+	// BLEFunnelURL is the public URL clients hit when BLEFunnel is on,
+	// e.g. https://pi.tailXXXX.ts.net/api/ble. Empty when off.
+	BLEFunnelURL string `json:"ble_funnel_url"`
 }
+
+// bleFunnelPath is the URL prefix exposed via Funnel. The Pi's chi
+// router mounts the bearer-authed sub-router under /api/ble, so this
+// is what gets selectively published. Centralised here so the enable /
+// disable / detect paths stay in sync.
+const bleFunnelPath = "/api/ble"
 
 // RemoteService manages the tailscaled lifecycle.
 //
@@ -131,7 +153,106 @@ func (s *RemoteService) Status(ctx context.Context) (RemoteStatus, error) {
 	if len(raw.Self.TailscaleIPs) > 0 {
 		out.TailnetIPv4 = raw.Self.TailscaleIPs[0]
 	}
+
+	// Funnel detection. `tailscale serve status --json` returns the
+	// current serve+funnel config; we look for a Web[<host>:443] entry
+	// that handles /api/ble AND has AllowFunnel == true. A serve entry
+	// without funnel (i.e. tailnet-only) doesn't count — the whole
+	// point of the toggle is making /api/ble public.
+	//
+	// If `serve status` errors (older tailscale, daemon issue, no
+	// serve config yet), we report BLEFunnel: false silently — the UI
+	// will offer the operator to enable it.
+	if out.Authenticated {
+		serveCmd := exec.CommandContext(ctx, "tailscale", "serve", "status", "--json")
+		if serveOut, err := serveCmd.Output(); err == nil {
+			out.BLEFunnel, out.BLEFunnelURL = parseServeStatus(serveOut, out.TailnetHostname)
+		}
+	}
 	return out, nil
+}
+
+// parseServeStatus inspects the tailscale serve JSON for an active
+// Funnel handler on the BLE path. Returned URL is empty when not on.
+//
+// Extracted as a free function so unit tests can drive it without
+// shelling out.
+func parseServeStatus(jsonBytes []byte, hostname string) (bool, string) {
+	var st struct {
+		Web         map[string]struct {
+			Handlers map[string]any `json:"Handlers"`
+		} `json:"Web"`
+		AllowFunnel map[string]bool `json:"AllowFunnel"`
+	}
+	if err := json.Unmarshal(jsonBytes, &st); err != nil {
+		return false, ""
+	}
+	for hostPort, web := range st.Web {
+		if _, ok := web.Handlers[bleFunnelPath]; !ok {
+			continue
+		}
+		if !st.AllowFunnel[hostPort] {
+			continue
+		}
+		// hostPort is e.g. "pi.tail1234.ts.net:443" — strip the port
+		// for the URL we surface to the operator.
+		host := hostPort
+		if i := strings.LastIndex(hostPort, ":"); i > 0 {
+			host = hostPort[:i]
+		}
+		return true, "https://" + host + bleFunnelPath
+	}
+	_ = hostname // accepted for callers that may want it later
+	return false, ""
+}
+
+// EnableBLEFunnel exposes /api/ble publicly via Tailscale Funnel. The
+// Pi's local listener stays self-signed on :8443; Tailscale's edge
+// terminates the public Let's Encrypt TLS and proxies inwards over the
+// existing WireGuard tunnel. We use `https+insecure://localhost:8443`
+// as the upstream so Funnel accepts the Pi's self-signed cert.
+//
+// Path scope: --set-path=/api/ble — only this prefix is published.
+// Everything else on :8443 (admin UI, /garage, …) stays Tailscale-only.
+//
+// Prerequisites the operator must have satisfied OUTSIDE this code:
+//   - tailscaled installed + authenticated to a tailnet (covered by
+//     the existing Install/Up flow).
+//   - Funnel enabled for the tailnet at
+//     https://login.tailscale.com/admin/dns/feature-flags. If not,
+//     the CLI returns an explicit "funnel is not enabled" error which
+//     we surface verbatim.
+func (s *RemoteService) EnableBLEFunnel(ctx context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cmd := exec.CommandContext(ctx,
+		"tailscale", "funnel",
+		"--bg",
+		"--set-path="+bleFunnelPath,
+		"https+insecure://localhost:8443",
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("enable BLE funnel: %w\n%s", err, string(out))
+	}
+	return nil
+}
+
+// DisableBLEFunnel removes the /api/ble Funnel handler. The Pi's
+// local :8443 listener is untouched; only the public-edge exposure
+// goes away. Other serve handlers (if the operator has set any) are
+// preserved — we target only our path.
+func (s *RemoteService) DisableBLEFunnel(ctx context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cmd := exec.CommandContext(ctx,
+		"tailscale", "funnel",
+		"--set-path="+bleFunnelPath,
+		"off",
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("disable BLE funnel: %w\n%s", err, string(out))
+	}
+	return nil
 }
 
 // Install runs Tailscale's official install script. ~30s, idempotent

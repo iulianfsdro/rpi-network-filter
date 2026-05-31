@@ -187,6 +187,8 @@ func NewRouterWithFS(db *sql.DB, svc *services.Services, cfg config.Config, webF
 				r.Post("/install", remoteH.Install)
 				r.Post("/up", remoteH.Up)
 				r.Post("/logout", remoteH.Logout)
+				r.Post("/funnel/ble/enable", remoteH.EnableBLEFunnel)
+				r.Post("/funnel/ble/disable", remoteH.DisableBLEFunnel)
 			})
 		})
 	})

@@ -91,6 +91,40 @@ func (h *RemoteHandler) Up(w http.ResponseWriter, r *http.Request) {
 	JSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
+// EnableBLEFunnel flips on Tailscale Funnel for /api/ble. Returns the
+// updated RemoteStatus so the UI doesn't have to re-poll. Audit logged.
+func (h *RemoteHandler) EnableBLEFunnel(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	if err := h.remote.EnableBLEFunnel(ctx); err != nil {
+		JSONError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	if u := GetUser(r); u != nil {
+		h.audit.Log("remote.funnel.ble.enable",
+			u.Username+" exposed /api/ble via Tailscale Funnel")
+	}
+	st, _ := h.remote.Status(ctx)
+	JSON(w, http.StatusOK, st)
+}
+
+// DisableBLEFunnel removes the public Funnel handler for /api/ble. The
+// local listener stays up; only the public exposure goes away.
+func (h *RemoteHandler) DisableBLEFunnel(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	if err := h.remote.DisableBLEFunnel(ctx); err != nil {
+		JSONError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	if u := GetUser(r); u != nil {
+		h.audit.Log("remote.funnel.ble.disable",
+			u.Username+" hid /api/ble from the public internet")
+	}
+	st, _ := h.remote.Status(ctx)
+	JSON(w, http.StatusOK, st)
+}
+
 func (h *RemoteHandler) Logout(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
