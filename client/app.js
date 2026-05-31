@@ -318,11 +318,6 @@ function clientApp() {
             try {
                 const kp = await airgap.loadDeviceKey();
                 if (!kp) throw new Error('no device key — generate one first');
-                // The Pi's /pair endpoint is the canonical source of
-                // truth for the VIN — same value the SDK scans for over
-                // BLE AND the same value the car expects in the AAD's
-                // personalization tag. Refresh every call so a freshly-
-                // saved VIN works without a reconnect.
                 const pairInfo = await api.get('/pair');
                 if (!pairInfo?.vin) {
                     throw new Error('Pi has no VIN configured — enter one in the VIN card above');
@@ -330,19 +325,20 @@ function clientApp() {
                 this.vin = pairInfo.vin;
                 const vin = pairInfo.vin;
 
-                // Cached-session path (Thread D): the SessionInfo
-                // handshake costs ~2 s, so reuse the open BLE session
-                // across multiple commands fired within ~25 s of each
-                // other. First command in a flow opens fresh; the
-                // rest fly.
+                // Build the action first (async — needs proto loader)
+                // so we know which domain to open the session against.
+                // Thread C: the builder returns {domain, bytes}; the
+                // domain picks VCSEC vs Infotainment.
+                const action = await actionBuilder();
+
                 const resp = await airgap.withCachedSession(
-                    { api, vin, deviceKeyPair: kp, domain: airgap.DOMAIN_INFOTAINMENT },
+                    { api, vin, deviceKeyPair: kp, domain: action.domain },
                     async (session, cached) => {
                         this.directStatus = cached
                             ? `[${label}] cached session · counter=${session.counter} · sending…`
                             : `[${label}] new session · counter=${session.counter} · sending…`;
                         return await airgap.sendDirectCommandWithApi({
-                            api, session, action: actionBuilder(),
+                            api, session, payloadBytes: action.bytes,
                         });
                     },
                 );
@@ -393,8 +389,30 @@ function clientApp() {
                 this.directBusy = false;
             }
         },
-        directHonk()         { return this._directDo(airgap.honkAction,        'honk'); },
-        directFlashLights()  { return this._directDo(airgap.flashLightsAction, 'flash-lights'); },
+        directHonk()             { return this._directDo(airgap.honkAction,             'honk'); },
+        directFlashLights()      { return this._directDo(airgap.flashLightsAction,      'flash-lights'); },
+        // VCSEC actions — locks, closures, wake
+        directLock()             { return this._directDo(airgap.lockAction,             'lock'); },
+        directUnlock()           { return this._directDo(airgap.unlockAction,           'unlock'); },
+        directWake()             { return this._directDo(airgap.wakeAction,             'wake'); },
+        directOpenFrunk()        { return this._directDo(airgap.openFrunkAction,        'open-frunk'); },
+        directOpenTrunk()        { return this._directDo(airgap.openTrunkAction,        'open-trunk'); },
+        directCloseTrunk()       { return this._directDo(airgap.closeTrunkAction,       'close-trunk'); },
+        directOpenChargePort()   { return this._directDo(airgap.openChargePortAction,   'open-charge-port'); },
+        directCloseChargePort()  { return this._directDo(airgap.closeChargePortAction,  'close-charge-port'); },
+        // Infotainment — climate, charging, sentry
+        directClimateOn()        { return this._directDo(airgap.climateOnAction,        'climate-on'); },
+        directClimateOff()       { return this._directDo(airgap.climateOffAction,       'climate-off'); },
+        directSentryOn()         { return this._directDo(airgap.sentryOnAction,         'sentry-on'); },
+        directSentryOff()        { return this._directDo(airgap.sentryOffAction,        'sentry-off'); },
+        directStartCharging()    { return this._directDo(airgap.startChargingAction,    'start-charging'); },
+        directStopCharging()     { return this._directDo(airgap.stopChargingAction,     'stop-charging'); },
+        directChargeMaxRange()   { return this._directDo(airgap.chargeMaxRangeAction,   'charge-max-range'); },
+        directChargeStandardRange() { return this._directDo(airgap.chargeStandardRangeAction, 'charge-standard-range'); },
+        directSetChargeLimit()      {
+            const p = Number(this.chargeLimit);
+            return this._directDo(() => airgap.setChargeLimitAction(p), `set-charge-limit:${p}`);
+        },
 
         // enrolKey ships the public half to the Pi for the BLE
         // add-key-request flow. The operator still has to tap the
@@ -458,32 +476,9 @@ function clientApp() {
             } catch (e) { /* api wrapper toasted */ }
         },
 
-        // ─── Command fan-out ────────────────────────────────────
-        // cmd is the bread-and-butter — fire a named command, toast on
-        // success, refresh state after a short delay (the car needs a
-        // beat for its sensors to catch up).
-        async cmd(name) {
-            try {
-                await api.post('/cmd/' + name);
-                notify(name.replace(/-/g, ' ') + ' ✓', 'success');
-                setTimeout(() => this.refresh(), 1200);
-                this.loadLog();
-            } catch (e) {
-                notify(e.message || (name + ' failed'), 'error');
-            }
-        },
-
-        // cmdJSON is cmd's sibling for commands that take a body. Same
-        // refresh + log pattern; only the wire shape differs.
-        async cmdJSON(name, body) {
-            try {
-                await api.post('/cmd/' + name, body);
-                notify(name.replace(/-/g, ' ') + ' ✓', 'success');
-                setTimeout(() => this.refresh(), 1200);
-                this.loadLog();
-            } catch (e) {
-                notify(e.message || (name + ' failed'), 'error');
-            }
-        },
+        // cmd / cmdJSON used to POST to /api/ble/cmd/{name} — that
+        // route is gone (Thread A). Every command now goes through
+        // _directDo + an action builder + the byte forwarder, with
+        // crypto fully on the client.
     };
 }

@@ -280,13 +280,13 @@ async function sendDirectCommand(session, action) {
     throw new Error('internal: sendDirectCommand needs api — call sendDirectCommandWithApi');
 }
 
-// sendDirectCommandWithApi is the practical entry point — exposes
-// the `api` parameter so the calling layer can inject the
-// bearer-aware fetch wrapper from app.js. The cleaner refactor is
-// to put `api` on the session handle; we'll do that in a follow-up.
-async function sendDirectCommandWithApi({ api, session, action }) {
-    const proto = await airgap.loadProto();
-    const actionBytes = airgap.encodeMessage(proto.Action, action);
+// sendDirectCommandWithApi ships a pre-encoded inner payload through
+// the byte forwarder. The caller supplies the bytes (Thread C made
+// action builders return ENCODED bytes, not an object, so VCSEC and
+// Infotainment can share this path — they use different proto wrappers
+// inside the ciphertext).
+async function sendDirectCommandWithApi({ api, session, payloadBytes }) {
+    const actionBytes = payloadBytes;
 
     if (session.counter >= 0xFFFFFFFE) {
         throw new Error('session counter rolled over — close and re-open');
@@ -410,35 +410,96 @@ function closeAllCachedSessions() {
     }
 }
 
-// honkAction returns the Action protobuf for an Infotainment honk.
-// Inner shape: Action{ VehicleAction{ VehicleControlHonkHornAction{} } }.
-// VehicleControlHonkHornAction has no fields; the very fact of it
-// being the oneof case carries the command.
-function honkAction() {
-    return {
-        vehicleAction: {
-            vehicleControlHonkHornAction: {},
-        },
-    };
+// ── Action builders (Thread C v1) ────────────────────────────────
+//
+// Each builder returns { domain, bytes }: the wire bytes ready to be
+// AES-GCM-encrypted, and the BLE domain those bytes target. Two proto
+// wrappers come into play depending on domain:
+//
+//   • DOMAIN_INFOTAINMENT (3) → CarServer.Action wrapping VehicleAction
+//   • DOMAIN_VEHICLE_SECURITY (2) → VCSEC.UnsignedMessage
+//
+// Both end up encrypted opaquely once they hit sendDirectCommandWithApi;
+// the per-domain proto choice only matters here at construction time.
+
+const DOMAIN_INFOTAINMENT     = 3;
+const DOMAIN_VEHICLE_SECURITY = 2;
+
+// VCSEC enum values, vendored from vcsec.proto so action builders
+// don't have to re-parse the proto every call.
+const RKE_ACTION = Object.freeze({
+    UNLOCK:                 0,
+    LOCK:                   1,
+    REMOTE_DRIVE:          20,
+    AUTO_SECURE_VEHICLE:   29,
+    WAKE_VEHICLE:          30,
+});
+const CLOSURE_MOVE = Object.freeze({
+    NONE:  0,
+    MOVE:  1,
+    STOP:  2,
+    OPEN:  3,
+    CLOSE: 4,
+});
+
+// _encodeInfotainmentAction is the common path for any
+// VehicleAction sub-message. Returns the encoded CarServer.Action.
+async function _encodeInfotainmentAction(vehicleAction) {
+    const proto = await airgap.loadProto();
+    return airgap.encodeMessage(proto.Action, { vehicleAction });
 }
 
-// flashLightsAction — another zero-field Infotainment action. Quick
-// alternative to honk for testing without making noise.
-function flashLightsAction() {
-    return {
-        vehicleAction: {
-            vehicleControlFlashLightsAction: {},
-        },
-    };
+// _encodeVCSECMessage wraps a sub_message into VCSEC.UnsignedMessage
+// and encodes it. The fields object's single key picks the oneof.
+async function _encodeVCSECMessage(subFields) {
+    const proto = await airgap.loadProto();
+    return airgap.encodeMessage(proto.VCSECUnsignedMessage, subFields);
 }
+
+// ─── Infotainment actions ───
+async function honkAction()        { return { domain: DOMAIN_INFOTAINMENT, bytes: await _encodeInfotainmentAction({ vehicleControlHonkHornAction: {} }) }; }
+async function flashLightsAction() { return { domain: DOMAIN_INFOTAINMENT, bytes: await _encodeInfotainmentAction({ vehicleControlFlashLightsAction: {} }) }; }
+async function climateOnAction()   { return { domain: DOMAIN_INFOTAINMENT, bytes: await _encodeInfotainmentAction({ hvacAutoAction: { powerOn: true } }) }; }
+async function climateOffAction()  { return { domain: DOMAIN_INFOTAINMENT, bytes: await _encodeInfotainmentAction({ hvacAutoAction: { powerOn: false } }) }; }
+async function sentryOnAction()    { return { domain: DOMAIN_INFOTAINMENT, bytes: await _encodeInfotainmentAction({ vehicleControlSetSentryModeAction: { on: true } }) }; }
+async function sentryOffAction()   { return { domain: DOMAIN_INFOTAINMENT, bytes: await _encodeInfotainmentAction({ vehicleControlSetSentryModeAction: { on: false } }) }; }
+async function startChargingAction()    { return { domain: DOMAIN_INFOTAINMENT, bytes: await _encodeInfotainmentAction({ chargingStartStopAction: { start: {} } }) }; }
+async function stopChargingAction()     { return { domain: DOMAIN_INFOTAINMENT, bytes: await _encodeInfotainmentAction({ chargingStartStopAction: { stop:  {} } }) }; }
+async function chargeMaxRangeAction()   { return { domain: DOMAIN_INFOTAINMENT, bytes: await _encodeInfotainmentAction({ chargingStartStopAction: { startMaxRange:  {} } }) }; }
+async function chargeStandardRangeAction(){ return { domain: DOMAIN_INFOTAINMENT, bytes: await _encodeInfotainmentAction({ chargingStartStopAction: { startStandard: {} } }) }; }
+async function setChargeLimitAction(percent) {
+    const p = Math.round(percent);
+    if (p < 50 || p > 100) throw new Error('charge limit must be 50..100');
+    return { domain: DOMAIN_INFOTAINMENT, bytes: await _encodeInfotainmentAction({ chargingSetLimitAction: { percent: p } }) };
+}
+
+// ─── VCSEC actions ───
+async function lockAction()    { return { domain: DOMAIN_VEHICLE_SECURITY, bytes: await _encodeVCSECMessage({ RKEAction: RKE_ACTION.LOCK   }) }; }
+async function unlockAction()  { return { domain: DOMAIN_VEHICLE_SECURITY, bytes: await _encodeVCSECMessage({ RKEAction: RKE_ACTION.UNLOCK }) }; }
+async function wakeAction()    { return { domain: DOMAIN_VEHICLE_SECURITY, bytes: await _encodeVCSECMessage({ RKEAction: RKE_ACTION.WAKE_VEHICLE }) }; }
+
+async function openFrunkAction()      { return { domain: DOMAIN_VEHICLE_SECURITY, bytes: await _encodeVCSECMessage({ closureMoveRequest: { frontTrunk: CLOSURE_MOVE.OPEN } }) }; }
+async function openTrunkAction()      { return { domain: DOMAIN_VEHICLE_SECURITY, bytes: await _encodeVCSECMessage({ closureMoveRequest: { rearTrunk:  CLOSURE_MOVE.OPEN } }) }; }
+async function closeTrunkAction()     { return { domain: DOMAIN_VEHICLE_SECURITY, bytes: await _encodeVCSECMessage({ closureMoveRequest: { rearTrunk:  CLOSURE_MOVE.CLOSE } }) }; }
+async function openChargePortAction() { return { domain: DOMAIN_VEHICLE_SECURITY, bytes: await _encodeVCSECMessage({ closureMoveRequest: { chargePort: CLOSURE_MOVE.OPEN  } }) }; }
+async function closeChargePortAction(){ return { domain: DOMAIN_VEHICLE_SECURITY, bytes: await _encodeVCSECMessage({ closureMoveRequest: { chargePort: CLOSURE_MOVE.CLOSE } }) }; }
 
 Object.assign(window.airgap, {
     openDirectSession,
     sendDirectCommandWithApi,
     withCachedSession,
     closeAllCachedSessions,
-    honkAction,
-    flashLightsAction,
-    DOMAIN_INFOTAINMENT:     3,
-    DOMAIN_VEHICLE_SECURITY: 2,
+    DOMAIN_INFOTAINMENT,
+    DOMAIN_VEHICLE_SECURITY,
+
+    // Action builders.
+    honkAction, flashLightsAction,
+    climateOnAction, climateOffAction,
+    sentryOnAction, sentryOffAction,
+    startChargingAction, stopChargingAction,
+    chargeMaxRangeAction, chargeStandardRangeAction,
+    setChargeLimitAction,
+    lockAction, unlockAction, wakeAction,
+    openFrunkAction, openTrunkAction, closeTrunkAction,
+    openChargePortAction, closeChargePortAction,
 });

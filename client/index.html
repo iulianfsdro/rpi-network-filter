@@ -225,11 +225,11 @@
                     </div>
                     <div class="card-body">
                         <div class="row-wrap">
-                            <button class="btn" @click="cmd('lock')">Lock</button>
-                            <button class="btn" @click="cmd('unlock')">Unlock</button>
-                            <button class="btn ghost" @click="cmd('honk')">Honk</button>
-                            <button class="btn ghost" @click="cmd('flash-lights')">Flash lights</button>
-                            <button class="btn ghost" @click="cmd('wake')">Wake</button>
+                            <button class="btn" @click="directLock()">Lock</button>
+                            <button class="btn" @click="directUnlock()">Unlock</button>
+                            <button class="btn ghost" @click="directHonk()">Honk</button>
+                            <button class="btn ghost" @click="directFlashLights()">Flash lights</button>
+                            <button class="btn ghost" @click="directWake()">Wake</button>
                         </div>
                     </div>
                 </div>
@@ -247,21 +247,12 @@
                     </div>
                     <div class="card-body">
                         <div class="row-wrap" style="margin-bottom:14px;">
-                            <button class="btn" @click="cmd('climate-on')">Climate ON</button>
-                            <button class="btn" @click="cmd('climate-off')">Climate OFF</button>
-                            <button class="btn ghost" @click="cmd('defrost-on')">Defrost ON</button>
-                            <button class="btn ghost" @click="cmd('defrost-off')">Defrost OFF</button>
-                        </div>
-                        <div class="form-row" style="gap:10px; align-items:center;">
-                            <input type="number" class="input" min="15" max="28" step="0.5"
-                                   x-model.number="climateTarget"
-                                   style="max-width:140px;">
-                            <span class="meta">°C target</span>
-                            <button class="btn"
-                                    :disabled="!climateTarget || climateTarget < 15 || climateTarget > 28"
-                                    @click="cmdJSON('set-climate-temp', { temperature_c: Number(climateTarget) })">
-                                Set
-                            </button>
+                            <button class="btn" @click="directClimateOn()">Climate ON</button>
+                            <button class="btn" @click="directClimateOff()">Climate OFF</button>
+                            <!-- defrost + set-temp need their own
+                                 action builders (HvacDefrostAction,
+                                 HvacTemperatureAdjustmentAction).
+                                 Coming in Thread C-2. -->
                         </div>
                     </div>
                 </div>
@@ -276,11 +267,11 @@
                     </div>
                     <div class="card-body">
                         <div class="row-wrap">
-                            <button class="btn ghost" @click="cmd('open-frunk')">Open frunk</button>
-                            <button class="btn ghost" @click="cmd('open-trunk')">Open trunk</button>
-                            <button class="btn ghost" @click="cmd('close-trunk')">Close trunk</button>
-                            <button class="btn ghost" @click="cmd('open-charge-port')">Open charge port</button>
-                            <button class="btn ghost" @click="cmd('close-charge-port')">Close charge port</button>
+                            <button class="btn ghost" @click="directOpenFrunk()">Open frunk</button>
+                            <button class="btn ghost" @click="directOpenTrunk()">Open trunk</button>
+                            <button class="btn ghost" @click="directCloseTrunk()">Close trunk</button>
+                            <button class="btn ghost" @click="directOpenChargePort()">Open charge port</button>
+                            <button class="btn ghost" @click="directCloseChargePort()">Close charge port</button>
                         </div>
                     </div>
                 </div>
@@ -298,10 +289,10 @@
                     </div>
                     <div class="card-body">
                         <div class="row-wrap" style="margin-bottom:14px;">
-                            <button class="btn" @click="cmd('start-charging')">Start charging</button>
-                            <button class="btn" @click="cmd('stop-charging')">Stop charging</button>
-                            <button class="btn ghost" @click="cmd('charge-standard-range')">Standard range</button>
-                            <button class="btn ghost" @click="cmd('charge-max-range')">Max range</button>
+                            <button class="btn" @click="directStartCharging()">Start charging</button>
+                            <button class="btn" @click="directStopCharging()">Stop charging</button>
+                            <button class="btn ghost" @click="directChargeStandardRange()">Standard range</button>
+                            <button class="btn ghost" @click="directChargeMaxRange()">Max range</button>
                         </div>
                         <div class="form-row" style="gap:10px; align-items:center;">
                             <input type="number" class="input" min="50" max="100" step="1"
@@ -310,7 +301,7 @@
                             <span class="meta">% limit</span>
                             <button class="btn"
                                     :disabled="!chargeLimit || chargeLimit < 50 || chargeLimit > 100"
-                                    @click="cmdJSON('set-charge-limit', { percent: Number(chargeLimit) })">
+                                    @click="directSetChargeLimit()">
                                 Set
                             </button>
                         </div>
@@ -329,8 +320,8 @@
                     </div>
                     <div class="card-body">
                         <div class="row-wrap">
-                            <button class="btn" @click="cmd('sentry-on')">Sentry ON</button>
-                            <button class="btn" @click="cmd('sentry-off')">Sentry OFF</button>
+                            <button class="btn" @click="directSentryOn()">Sentry ON</button>
+                            <button class="btn" @click="directSentryOff()">Sentry OFF</button>
                         </div>
                     </div>
                 </div>
