@@ -107,6 +107,92 @@
         </div>
     </div>
 
+    <!-- BLE client tokens — bearer auth for /api/ble/* -->
+    <div class="card">
+        <div class="card-head">
+            <div>
+                <div class="card-head-title">BLE client tokens</div>
+                <div class="card-head-sub">Bearer tokens authorising external clients to drive the car via <code style="font-size:11.5px;">/api/ble/*</code>. The token text is shown once at issue time and never persisted in plaintext.</div>
+            </div>
+            <div class="card-head-spacer"></div>
+            <button class="btn" @click="tokenDialogOpen = true; newTokenName = '';">Issue token</button>
+        </div>
+        <div class="card-body">
+            <table class="tbl">
+                <thead>
+                    <tr>
+                        <th>Name</th>
+                        <th style="width:160px;">Created</th>
+                        <th style="width:160px;">Last used</th>
+                        <th style="width:120px;">Status</th>
+                        <th style="width:100px;" class="right">&nbsp;</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <template x-for="t in bleTokens" :key="t.id">
+                        <tr>
+                            <td class="cell-primary" x-text="t.name"></td>
+                            <td class="cell-mac" x-text="new Date(t.created_at).toLocaleString()"></td>
+                            <td class="cell-mac" x-text="t.last_used_at ? new Date(t.last_used_at).toLocaleString() : '—'"></td>
+                            <td>
+                                <span class="badge dot" :class="t.revoked_at ? 'muted' : 'success'"
+                                      x-text="t.revoked_at ? 'revoked' : 'active'"></span>
+                            </td>
+                            <td class="actions">
+                                <button class="btn sm danger"
+                                        x-show="!t.revoked_at"
+                                        @click="revokeToken(t)">Revoke</button>
+                            </td>
+                        </tr>
+                    </template>
+                    <template x-if="bleTokens.length === 0">
+                        <tr><td colspan="5" style="text-align:center; color:var(--fg-mute); padding:22px;">No tokens issued yet.</td></tr>
+                    </template>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- Issue-token dialog -->
+    <div class="dialog-back" x-show="tokenDialogOpen" x-cloak @keydown.escape.window="tokenDialogOpen = false">
+        <div class="dialog">
+            <div class="dialog-head">
+                <div class="dialog-title">Issue BLE client token</div>
+                <button class="dialog-close" @click="tokenDialogOpen = false">&times;</button>
+            </div>
+            <div class="dialog-body">
+                <template x-if="!issuedPlain">
+                    <div>
+                        <label class="label">Client name</label>
+                        <input class="input" x-model="newTokenName" placeholder="ivan's macbook" @keydown.enter="issueToken()" autofocus>
+                        <div class="field-help">Operator-visible label — shows up in audit logs as <code>client:NAME</code>.</div>
+                    </div>
+                </template>
+                <template x-if="issuedPlain">
+                    <div>
+                        <div class="protected-banner" style="background:var(--ok-faint); border-color:var(--ok); color:var(--ok);">
+                            <strong>Save this token now.</strong> It will not be shown again. Copy it into the client app's enrolment screen and store it in your password manager as a backup.
+                        </div>
+                        <label class="label">Token (one-time display)</label>
+                        <textarea class="textarea mono" readonly x-text="issuedPlain" style="min-height:80px; word-break:break-all;"></textarea>
+                        <button class="btn sm" style="margin-top:10px;" @click="copyToken()">Copy to clipboard</button>
+                    </div>
+                </template>
+            </div>
+            <div class="dialog-foot">
+                <template x-if="!issuedPlain">
+                    <div style="display:flex; gap:8px;">
+                        <button class="btn ghost" @click="tokenDialogOpen = false">Cancel</button>
+                        <button class="btn primary" :disabled="!newTokenName.trim()" @click="issueToken()">Issue</button>
+                    </div>
+                </template>
+                <template x-if="issuedPlain">
+                    <button class="btn primary" @click="closeIssueDialog()">Done</button>
+                </template>
+            </div>
+        </div>
+    </div>
+
     <!-- System read-only info + actions -->
     <div class="card">
         <div class="card-head">
@@ -152,9 +238,57 @@ function settingsApp() {
         confirmPassword: '',
         saving: false,
         auditLogs: [],
+
+        // BLE client tokens (V4.4 Phase 1). bleTokens is the rendered
+        // list; tokenDialogOpen drives the issue/display modal;
+        // issuedPlain holds the one-time plaintext returned by POST and
+        // is wiped when the operator dismisses the dialog.
+        bleTokens: [],
+        tokenDialogOpen: false,
+        newTokenName: '',
+        issuedPlain: '',
+
         async load() {
             this.settings  = (await api.get('/api/settings'))     || {};
             this.auditLogs = (await api.get('/api/system/audit')) || [];
+            await this.loadTokens();
+        },
+        async loadTokens() {
+            try {
+                const r = await api.get('/api/tesla/tokens');
+                this.bleTokens = r.tokens || [];
+            } catch (e) { /* api wrapper toasted */ }
+        },
+        async issueToken() {
+            const name = this.newTokenName.trim();
+            if (!name) return;
+            try {
+                const r = await api.post('/api/tesla/tokens', { name });
+                this.issuedPlain = r.plain || '';
+                await this.loadTokens();
+            } catch (e) { /* api wrapper toasted */ }
+        },
+        async revokeToken(t) {
+            if (!confirm('Revoke "' + t.name + '"? This client will lose access immediately.')) return;
+            try {
+                await api.delete('/api/tesla/tokens/' + t.id);
+                notify('Token revoked', 'success');
+                await this.loadTokens();
+            } catch (e) {}
+        },
+        async copyToken() {
+            try {
+                await navigator.clipboard.writeText(this.issuedPlain);
+                notify('Copied', 'success');
+            } catch (e) {
+                notify('Could not copy — select manually', 'error');
+            }
+        },
+        closeIssueDialog() {
+            // Wipe plaintext from JS memory the instant the modal closes.
+            this.issuedPlain = '';
+            this.newTokenName = '';
+            this.tokenDialogOpen = false;
         },
         async saveHotspot() {
             this.saving = true;

@@ -760,6 +760,31 @@ var migrations = []string{
 
 	CREATE INDEX IF NOT EXISTS idx_tesla_command_log_at ON tesla_command_log(at DESC);
 	CREATE INDEX IF NOT EXISTS idx_tesla_command_log_user ON tesla_command_log(user_id, at DESC);`,
+
+	// v21: BLE client tokens. V4.4 Phase 1 sets up an /api/ble/* sub-router
+	// that's safe to expose publicly via Tailscale Funnel — bearer-token
+	// auth only, no session cookie. Each enrolled client (laptop, phone,
+	// later native app) gets its own token. Tokens are stored hashed
+	// (SHA-256, hex-encoded); the plaintext is shown to the operator
+	// exactly once at issue time and never persisted.
+	//
+	// name is operator-supplied ("ivan's macbook", "wife's iphone"). The
+	// audit log records "client:NAME ran X" so a stolen token's blast
+	// radius is attributable.
+	//
+	// revoked_at is the gate — NULL means active, a timestamp means
+	// rejected. We don't delete rows so the audit trail of "this token
+	// existed once and was used these times" survives revocation.
+	`CREATE TABLE IF NOT EXISTS tesla_client_tokens (
+		id            INTEGER PRIMARY KEY AUTOINCREMENT,
+		name          TEXT NOT NULL,
+		token_hash    TEXT NOT NULL UNIQUE,
+		created_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		last_used_at  TIMESTAMP,
+		revoked_at    TIMESTAMP
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_tesla_client_tokens_hash ON tesla_client_tokens(token_hash);`,
 }
 
 func Migrate(db *sql.DB) error {

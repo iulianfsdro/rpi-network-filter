@@ -22,6 +22,7 @@ type Services struct {
 	Spoof      *SpoofService
 	SNIProxy   *SNIProxyService
 	Tesla      *TeslaService
+	TeslaToken *TeslaTokenService
 	Remote     *RemoteService
 }
 
@@ -44,6 +45,7 @@ func New(db *sql.DB, exec *executor.Executor, cfg config.Config) *Services {
 		Spoof:      NewSpoofService(cfg, exec),
 		SNIProxy:   NewSNIProxyService(cfg, db, trafficLog),
 		Tesla:      NewTeslaService(db, audit),
+		TeslaToken: NewTeslaTokenService(db),
 		Remote:     NewRemoteService(),
 	}
 }

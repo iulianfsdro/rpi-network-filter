@@ -86,6 +86,23 @@ func NewRouterWithFS(db *sql.DB, svc *services.Services, cfg config.Config, webF
 		r.Post("/login", authH.Login)
 		r.Post("/logout", authH.Logout)
 
+		// /api/ble/* — the bearer-authed BLE surface, intentionally
+		// separated from the cookie-authed admin API so it can be
+		// exposed publicly via Tailscale Funnel without dragging
+		// /login, /traffic, /settings along with it.
+		//
+		// Same TeslaHandler methods as /api/tesla/* — the only
+		// difference is the auth gate (BLEBearerRequired synthesises
+		// a "client:NAME" virtual user for audit attribution).
+		r.Route("/ble", func(r chi.Router) {
+			r.Use(BLEBearerRequired(svc.TeslaToken))
+			r.Get("/pair", teslaH.PairingInfo)
+			r.Post("/pair/request", teslaH.RequestPairing)
+			r.Get("/state", teslaH.State)
+			r.Get("/log", teslaH.CommandLog)
+			r.Post("/cmd/{name}", teslaH.Command)
+		})
+
 		r.Group(func(r chi.Router) {
 			r.Use(APIAuthRequired(svc.Auth))
 			r.Get("/me", authH.Me)
@@ -156,6 +173,13 @@ func NewRouterWithFS(db *sql.DB, svc *services.Services, cfg config.Config, webF
 				r.Get("/state", teslaH.State)
 				r.Get("/log", teslaH.CommandLog)
 				r.Post("/commands/{name}", teslaH.Command)
+
+				// BLE client-token admin. Issue / list / revoke — the
+				// session-cookie operator only. Bearer tokens issued
+				// here unlock /api/ble/* for external clients.
+				r.Get("/tokens", teslaH.ListTokens)
+				r.Post("/tokens", teslaH.IssueToken)
+				r.Delete("/tokens/{id}", teslaH.RevokeToken)
 			})
 
 			r.Route("/remote", func(r chi.Router) {
