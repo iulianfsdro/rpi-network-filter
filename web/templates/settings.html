@@ -176,6 +176,13 @@
                         <label class="label">Token (one-time display)</label>
                         <textarea class="textarea mono" readonly x-text="issuedPlain" style="min-height:80px; word-break:break-all;"></textarea>
                         <button class="btn sm" style="margin-top:10px;" @click="copyToken()">Copy to clipboard</button>
+
+                        <label class="label" style="margin-top:18px;">Enrolment URL</label>
+                        <textarea class="textarea mono" readonly x-text="enrolUrl" style="min-height:60px; word-break:break-all;"></textarea>
+                        <div class="form-row" style="gap:8px; margin-top:10px;">
+                            <button class="btn sm" @click="copyEnrolUrl()">Copy URL</button>
+                            <span class="field-help" style="margin-top:0;">Paste this into the client app's <strong>API URL</strong> field — it auto-fills token + nickname.</span>
+                        </div>
                     </div>
                 </template>
             </div>
@@ -247,6 +254,11 @@ function settingsApp() {
         tokenDialogOpen: false,
         newTokenName: '',
         issuedPlain: '',
+        // enrolUrl bundles {api, token, nickname} into a single
+        // airgap://enrol?... URL the operator can copy into the
+        // client app — one-shot enrolment instead of three pastes.
+        // Computed in issueToken() once the plaintext is back.
+        enrolUrl: '',
 
         async load() {
             this.settings  = (await api.get('/api/settings'))     || {};
@@ -265,6 +277,18 @@ function settingsApp() {
             try {
                 const r = await api.post('/api/tesla/tokens', { name });
                 this.issuedPlain = r.plain || '';
+                // Bundle into a single URL for one-paste enrolment on
+                // the client side. The api URL is derived from the
+                // current location (operator is reaching us over
+                // Tailscale, LAN, or Funnel — whichever it is, that's
+                // the URL the client should use).
+                const apiBase = window.location.origin + '/api/ble';
+                const params = new URLSearchParams({
+                    api: apiBase,
+                    token: this.issuedPlain,
+                    nickname: name,
+                });
+                this.enrolUrl = 'airgap://enrol?' + params.toString();
                 await this.loadTokens();
             } catch (e) { /* api wrapper toasted */ }
         },
@@ -284,9 +308,18 @@ function settingsApp() {
                 notify('Could not copy — select manually', 'error');
             }
         },
+        async copyEnrolUrl() {
+            try {
+                await navigator.clipboard.writeText(this.enrolUrl);
+                notify('Enrolment URL copied', 'success');
+            } catch (e) {
+                notify('Could not copy — select manually', 'error');
+            }
+        },
         closeIssueDialog() {
             // Wipe plaintext from JS memory the instant the modal closes.
             this.issuedPlain = '';
+            this.enrolUrl = '';
             this.newTokenName = '';
             this.tokenDialogOpen = false;
         },

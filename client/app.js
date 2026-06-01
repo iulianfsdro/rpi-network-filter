@@ -203,6 +203,29 @@ function clientApp() {
             this.screen = 'enrol';
         },
 
+        // _autoParseEnrolUrl detects a pasted "airgap://enrol?...".
+        // Pulled out so it can be called from x-effect or @input on
+        // the API URL field. Idempotent — running it twice with the
+        // same parsed URL is a no-op.
+        _autoParseEnrolUrl() {
+            const v = (this.cfg.api || '').trim();
+            if (!v.startsWith('airgap://enrol?')) return;
+            try {
+                const u = new URL(v.replace('airgap://', 'http://airgap-internal/'));
+                const api = u.searchParams.get('api');
+                const token = u.searchParams.get('token');
+                const nickname = u.searchParams.get('nickname');
+                if (api && token) {
+                    this.cfg.api = api;
+                    this.cfg.token = token;
+                    if (nickname) this.cfg.nickname = nickname;
+                    notify('Enrolment URL parsed', 'success');
+                }
+            } catch (e) {
+                console.warn('[airgap] failed to parse enrolment URL:', e.message || e);
+            }
+        },
+
         // saveVin pushes the user-entered 17-char VIN to the Pi via
         // PUT /api/ble/vin. Subsequent /pair fetches will return it,
         // and crypto sessions will use it for AAD personalization.

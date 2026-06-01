@@ -98,13 +98,14 @@
                     <div class="card-body">
                         <div class="field">
                             <label class="label">API URL</label>
-                            <input class="input mono" x-model="cfg.api"
+                            <input class="input mono" x-model="cfg.api" @input="_autoParseEnrolUrl()"
                                    placeholder="https://pi.tail-XXXX.ts.net/api/ble">
                             <div class="enrol-help">
-                                Funnel: <code>https://&lt;your-pi-host&gt;.ts.net/api/ble</code> ·
-                                LAN: <code>https://192.168.4.1:8443/api/ble</code>.
-                                Note the <code>/api/ble</code> suffix — without it the bearer
-                                won't reach the bearer-authed routes.
+                                Paste either the API URL directly, OR an
+                                <code>airgap://enrol?api=…&amp;token=…&amp;nickname=…</code> URL
+                                from the Pi's <strong>Settings → BLE client tokens → Issue
+                                token</strong> screen — the URL form auto-fills all three
+                                fields below.
                             </div>
                         </div>
                         <div class="field">
