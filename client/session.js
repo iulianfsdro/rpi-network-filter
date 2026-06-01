@@ -337,7 +337,50 @@ async function sendDirectCommandWithApi({ api, session, payloadBytes }) {
 
     const respBytes = airgap.base64ToBytes(r.response_b64);
     const respMsg   = airgap.decodeMessage(proto.RoutableMessage, respBytes);
-    return respMsg;
+
+    // Thread C-2: decrypt the payload if present. The car wraps
+    // command responses (status, returned data, fault details) in
+    // an AES-GCM ciphertext under the same session key, with
+    // AAD derived from a metadata block that includes a hash of the
+    // request that triggered it (REQUEST_HASH) — so a response can't
+    // be replayed against a different request.
+    //
+    // For status-only commands (honk, lock) the unencrypted
+    // signedMessageStatus is enough and there's no payload to
+    // decrypt; for state reads the encrypted protobufMessageAsBytes
+    // carries a CarServer.Response we want.
+    let decryptedPayload = null;
+    const gcmResp = respMsg.signatureData?.AES_GCM_ResponseData;
+    if (gcmResp && respMsg.protobufMessageAsBytes && respMsg.protobufMessageAsBytes.length > 0) {
+        const requestHash = airgap.makeRequestHash(env.tag);
+        const responseDomain = respMsg.fromDestination?.domain ?? session.domain;
+        const responseFlags  = respMsg.flags || 0;
+        const fault          = respMsg.signedMessageStatus?.signedMessageFault || 0;
+
+        const aadDigest = await airgap.buildAesGcmResponseMetadata({
+            domain:       responseDomain,
+            verifierName: session.vin,
+            counter:      gcmResp.counter || 0,
+            flags:        responseFlags,
+            requestHash,
+            fault,
+        });
+        try {
+            decryptedPayload = await airgap.aesGcmDecrypt(
+                session.sessionKey,
+                gcmResp.nonce,
+                respMsg.protobufMessageAsBytes,
+                gcmResp.tag,
+                aadDigest,
+            );
+        } catch (e) {
+            // Decrypt failed — surface but keep the unencrypted
+            // status so the caller can at least show op_status/fault.
+            console.warn('[airgap] response decrypt failed:', e.message || e);
+        }
+    }
+
+    return { routable: respMsg, decryptedPayload };
 }
 
 // ── Session cache ────────────────────────────────────────────────
@@ -473,6 +516,45 @@ async function setChargeLimitAction(percent) {
     return { domain: DOMAIN_INFOTAINMENT, bytes: await _encodeInfotainmentAction({ chargingSetLimitAction: { percent: p } }) };
 }
 
+// ─── State-read actions ───
+// Each wraps a GetVehicleData sub-message; the car responds with a
+// CarServer.Response carrying the requested data. Domain is always
+// Infotainment (the centre console serves these reads).
+
+async function getChargeStateAction()  { return { domain: DOMAIN_INFOTAINMENT, bytes: await _encodeInfotainmentAction({ getVehicleData: { getChargeState:  {} } }) }; }
+async function getClimateStateAction() { return { domain: DOMAIN_INFOTAINMENT, bytes: await _encodeInfotainmentAction({ getVehicleData: { getClimateState: {} } }) }; }
+async function getDriveStateAction()   { return { domain: DOMAIN_INFOTAINMENT, bytes: await _encodeInfotainmentAction({ getVehicleData: { getDriveState:   {} } }) }; }
+
+// ─── Defrost + temperature (deferred from Thread C v1) ───
+//
+// HvacSetPreconditioningMaxAction toggles "max defrost"; the SDK uses
+// it for the Defrost button on the mobile app.
+// HvacTemperatureAdjustmentAction sets target cabin temperature; the
+// Temperature sub-message accepts a celsius float via the
+// `levels` repeated field (the SDK does it that way to handle dual-
+// zone vehicles — front/rear separate temps).
+
+async function defrostOnAction()  { return { domain: DOMAIN_INFOTAINMENT, bytes: await _encodeInfotainmentAction({ hvacSetPreconditioningMaxAction: { on: true,  manualOverride: false } }) }; }
+async function defrostOffAction() { return { domain: DOMAIN_INFOTAINMENT, bytes: await _encodeInfotainmentAction({ hvacSetPreconditioningMaxAction: { on: false, manualOverride: false } }) }; }
+
+async function setClimateTempAction(celsius) {
+    const c = Number(celsius);
+    if (!Number.isFinite(c) || c < 15 || c > 28) {
+        throw new Error('climate temperature must be 15..28 °C');
+    }
+    return {
+        domain: DOMAIN_INFOTAINMENT,
+        bytes: await _encodeInfotainmentAction({
+            hvacTemperatureAdjustmentAction: {
+                // levels = repeated float; first entry is driver, second
+                // passenger. Set both to the same value for single-zone
+                // cars and the SDK's "match passenger to driver" UX.
+                levels: [c, c],
+            },
+        }),
+    };
+}
+
 // ─── VCSEC actions ───
 async function lockAction()    { return { domain: DOMAIN_VEHICLE_SECURITY, bytes: await _encodeVCSECMessage({ RKEAction: RKE_ACTION.LOCK   }) }; }
 async function unlockAction()  { return { domain: DOMAIN_VEHICLE_SECURITY, bytes: await _encodeVCSECMessage({ RKEAction: RKE_ACTION.UNLOCK }) }; }
@@ -495,6 +577,8 @@ Object.assign(window.airgap, {
     // Action builders.
     honkAction, flashLightsAction,
     climateOnAction, climateOffAction,
+    defrostOnAction, defrostOffAction,
+    setClimateTempAction,
     sentryOnAction, sentryOffAction,
     startChargingAction, stopChargingAction,
     chargeMaxRangeAction, chargeStandardRangeAction,
@@ -502,4 +586,6 @@ Object.assign(window.airgap, {
     lockAction, unlockAction, wakeAction,
     openFrunkAction, openTrunkAction, closeTrunkAction,
     openChargePortAction, closeChargePortAction,
+    // State reads.
+    getChargeStateAction, getClimateStateAction, getDriveStateAction,
 });

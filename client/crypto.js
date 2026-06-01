@@ -221,6 +221,48 @@ class MetadataBlockBuilder {
     }
 }
 
+// buildAesGcmResponseMetadata is the response-side analogue of
+// buildAesGcmMetadata. The car uses these fields as AAD when it
+// encrypts a response; we use the same shape on decrypt.
+//
+// Field set differs from the command-side metadata:
+//   • SIGNATURE_TYPE = AES_GCM_RESPONSE (not _PERSONALIZED)
+//   • DOMAIN comes from response.from_destination (car's outbound
+//     domain), not request.to_destination
+//   • COUNTER + FLAGS as uint32 BE
+//   • REQUEST_HASH binds the response to the specific request that
+//     triggered it: [SIGNATURE_TYPE_AES_GCM_PERSONALIZED byte] ||
+//     request_tag (17 bytes total when the request used AES-GCM
+//     PERSONALIZED — the only command-time encryption we use today)
+//   • FAULT — the car's MessageFault_E as uint32 (0 = NONE on success)
+//
+// No EXPIRES_AT, no EPOCH, no SHA-256 trailing. Just the metadata
+// block hashed to 32 bytes.
+async function buildAesGcmResponseMetadata({ domain, verifierName, counter, flags, requestHash, fault }) {
+    const m = new MetadataBlockBuilder();
+    m.add(TAG.SIGNATURE_TYPE, new Uint8Array([SIGNATURE_TYPE.AES_GCM_RESPONSE]));
+    m.add(TAG.DOMAIN,         new Uint8Array([domain]));
+    m.add(TAG.PERSONALIZATION, typeof verifierName === 'string'
+        ? new TextEncoder().encode(verifierName) : verifierName);
+    m.addUint32(TAG.COUNTER,      counter || 0);
+    m.addUint32(TAG.FLAGS,        flags   || 0);
+    m.add(TAG.REQUEST_HASH,       requestHash);
+    m.addUint32(TAG.FAULT,        fault   || 0);
+    return await m.checksum(null);
+}
+
+// makeRequestHash builds the REQUEST_HASH tag value the car expects:
+// the request's signature-type byte followed by the request's tag.
+// For our path (only AES-GCM-PERSONALIZED commands today) the prefix
+// is byte 5 and the suffix is the 16-byte AES-GCM auth tag of the
+// outbound message.
+function makeRequestHash(requestTag) {
+    const out = new Uint8Array(1 + requestTag.length);
+    out[0] = SIGNATURE_TYPE.AES_GCM_PERSONALIZED;
+    out.set(requestTag, 1);
+    return out;
+}
+
 // buildAesGcmMetadata is the canonical builder for an AES-GCM
 // command's metadata. Fields are required by the SDK in this order;
 // flags is only added if > 0 (matches the SDK's "for backwards
@@ -320,6 +362,8 @@ Object.assign(window.airgap, {
     DOMAIN,
     MetadataBlockBuilder,
     buildAesGcmMetadata,
+    buildAesGcmResponseMetadata,
+    makeRequestHash,
     aesGcmEncrypt,
     aesGcmEncryptWithNonce,
     aesGcmDecrypt,

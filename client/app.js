@@ -343,14 +343,28 @@ function clientApp() {
                     },
                 );
 
-                // Full dump so we can read the exact car response.
-                console.log('[airgap] response RoutableMessage:', resp);
-                console.log('[airgap] response keys:', Object.keys(resp));
-                console.log('[airgap] signedMessageStatus:', resp.signedMessageStatus);
-                console.log('[airgap] signedMessageStatus keys:',
-                    resp.signedMessageStatus ? Object.keys(resp.signedMessageStatus) : '(none)');
+                // Thread C-2: sendDirectCommandWithApi now returns
+                // { routable, decryptedPayload }. Status comes from
+                // the unencrypted RoutableMessage; decryptedPayload
+                // (if non-null) is the CarServer.Response plaintext.
+                const routable = resp.routable;
+                if (resp.decryptedPayload) {
+                    // Decode the inner CarServer.Response and merge
+                    // any state-bearing fields into this.state so the
+                    // battery / climate / closures tiles populate.
+                    try {
+                        const proto = await airgap.loadProto();
+                        const carResp = airgap.decodeMessage(proto.Response, resp.decryptedPayload);
+                        console.log('[airgap] decrypted CarServer.Response:', carResp);
+                        this._mergeResponseIntoState(carResp);
+                    } catch (e) {
+                        console.warn('[airgap] decoded payload but not a Response:', e.message);
+                    }
+                }
+                console.log('[airgap] response RoutableMessage:', routable);
+                console.log('[airgap] signedMessageStatus:', routable.signedMessageStatus);
 
-                const status = resp.signedMessageStatus;
+                const status = routable.signedMessageStatus;
                 const opStatus = status?.operationStatus;
                 // The car may name the fault `signedMessageFault` (proto
                 // snake_case → camelCase) OR keep the original — try both.
@@ -389,6 +403,36 @@ function clientApp() {
                 this.directBusy = false;
             }
         },
+        // _mergeResponseIntoState pulls the field-level data the UI
+        // tiles consume out of a decoded CarServer.Response. The
+        // response is a oneof of many possible payloads; we cherry-
+        // pick the ones the existing /garage-style tiles render.
+        // Anything we don't recognise stays in console for debugging.
+        _mergeResponseIntoState(carResp) {
+            // Charge state: SOC, range, charging_state, charge_limit_soc
+            const cs = carResp?.vehicleData?.chargeState || carResp?.chargeState;
+            if (cs) {
+                this.state = this.state || {};
+                this.state.battery = {
+                    soc:                cs.batteryLevel,
+                    range_km:           cs.batteryRange != null ? Math.round(cs.batteryRange * 1.60934) : null,
+                    charging_state:     cs.chargingState,
+                    charge_limit_soc:   cs.chargeLimitSoc,
+                };
+            }
+            // Climate state: inside/outside temps, target, on/off.
+            const cl = carResp?.vehicleData?.climateState || carResp?.climateState;
+            if (cl) {
+                this.state = this.state || {};
+                this.state.climate = {
+                    inside_temp_c:  cl.insideTempCelsius,
+                    outside_temp_c: cl.outsideTempCelsius,
+                    target_temp_c:  cl.driverTempSetting,
+                    is_on:          cl.isClimateOn,
+                };
+            }
+        },
+
         directHonk()             { return this._directDo(airgap.honkAction,             'honk'); },
         directFlashLights()      { return this._directDo(airgap.flashLightsAction,      'flash-lights'); },
         // VCSEC actions — locks, closures, wake
@@ -412,6 +456,27 @@ function clientApp() {
         directSetChargeLimit()      {
             const p = Number(this.chargeLimit);
             return this._directDo(() => airgap.setChargeLimitAction(p), `set-charge-limit:${p}`);
+        },
+        directDefrostOn()           { return this._directDo(airgap.defrostOnAction,  'defrost-on'); },
+        directDefrostOff()          { return this._directDo(airgap.defrostOffAction, 'defrost-off'); },
+        directSetClimateTemp()      {
+            const c = Number(this.climateTarget);
+            return this._directDo(() => airgap.setClimateTempAction(c), `set-climate-temp:${c}`);
+        },
+
+        // State reads (Thread C-2). Each fires a GetVehicleData
+        // request whose response (encrypted CarServer.Response) we
+        // decrypt and stash on this.state so existing UI tiles
+        // populate.
+        directGetChargeState()      { return this._directDo(airgap.getChargeStateAction,  'get-charge-state'); },
+        directGetClimateState()     { return this._directDo(airgap.getClimateStateAction, 'get-climate-state'); },
+        directRefreshState() {
+            // Fire both back-to-back; thanks to the session cache they
+            // share one BLE session.
+            return (async () => {
+                await this.directGetChargeState();
+                await this.directGetClimateState();
+            })();
         },
 
         // enrolKey ships the public half to the Pi for the BLE

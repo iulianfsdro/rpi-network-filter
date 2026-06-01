@@ -158,6 +158,10 @@
                               :class="vin ? '' : 'warn'"></span>
                         <span x-text="vin ? ('BLE · ' + vin.slice(-6)) : 'no VIN'"></span>
                     </span>
+                    <button class="btn-icon" @click="directRefreshState()" title="Refresh state"
+                            :disabled="directBusy">
+                        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14 8a6 6 0 1 0-2 4.5"/><path d="M14 3v4h-4"/></svg>
+                    </button>
                     <button class="btn-icon" @click="forget()" title="Forget this Pi">
                         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="2.2"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3 3l1.5 1.5M11.5 11.5L13 13M3 13l1.5-1.5M11.5 4.5L13 3"/></svg>
                     </button>
@@ -249,10 +253,16 @@
                         <div class="row-wrap" style="margin-bottom:14px;">
                             <button class="btn" @click="directClimateOn()">Climate ON</button>
                             <button class="btn" @click="directClimateOff()">Climate OFF</button>
-                            <!-- defrost + set-temp need their own
-                                 action builders (HvacDefrostAction,
-                                 HvacTemperatureAdjustmentAction).
-                                 Coming in Thread C-2. -->
+                            <button class="btn ghost" @click="directDefrostOn()">Defrost ON</button>
+                            <button class="btn ghost" @click="directDefrostOff()">Defrost OFF</button>
+                        </div>
+                        <div class="form-row" style="gap:10px; align-items:center; margin-top:10px;">
+                            <input type="number" class="input" min="15" max="28" step="0.5"
+                                   x-model.number="climateTarget" style="max-width:140px;">
+                            <span class="meta">°C target</span>
+                            <button class="btn"
+                                    :disabled="!climateTarget || climateTarget < 15 || climateTarget > 28"
+                                    @click="directSetClimateTemp()">Set</button>
                         </div>
                     </div>
                 </div>
