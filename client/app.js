@@ -120,6 +120,29 @@ function clientApp() {
         climateTarget: 22,
         chargeLimit: 80,
 
+        // PIN-protected dialogs (Thread C-3).
+        valetDialogOpen: false,
+        valetPin: '',
+        speedLimitDialogOpen: false,
+        speedLimitPin: '',
+        speedLimitMph: 70,
+
+        // Navigation dialog.
+        navDialogOpen: false,
+        navMode: 'gps', // 'gps' | 'search' | 'waypoints'
+        navLat: 0,
+        navLon: 0,
+        navLabel: '',
+        navQuery: '',
+        navWaypoints: '',
+
+        // Boombox.
+        boomboxId: 9,
+
+        // Expose `airgap` on the model so x-on handlers can reference
+        // enums (airgap.CLIMATE_KEEPER.DOG, airgap.NAV_ORDER.APPEND).
+        airgap,
+
         // Device-key state (V4.4 Phase 3a). hasKey + keyFp are
         // populated by loadKeyState(); enrolling = true is set while
         // the BLE add-key-request is in flight.
@@ -478,6 +501,56 @@ function clientApp() {
                 await this.directGetClimateState();
             })();
         },
+
+        // ── Thread C-3 extras ──────────────────────────────────
+        // Climate / comfort
+        directSetClimateKeeper(mode) { return this._directDo(() => airgap.setClimateKeeperAction(mode), `climate-keeper:${mode}`); },
+        directSetCabinOverheat(on)   { return this._directDo(() => airgap.setCabinOverheatAction(on),   `cabin-overheat:${on}`); },
+        directKeepAccPowerOn()       { return this._directDo(() => airgap.setKeepAccPowerAction(true),  'keep-acc-power-on'); },
+        directKeepAccPowerOff()      { return this._directDo(() => airgap.setKeepAccPowerAction(false), 'keep-acc-power-off'); },
+        directWheelHeaterOn()        { return this._directDo(() => airgap.setSteeringWheelHeaterAction(true),  'wheel-heater-on'); },
+        directWheelHeaterOff()       { return this._directDo(() => airgap.setSteeringWheelHeaterAction(false), 'wheel-heater-off'); },
+        // Windows
+        directVentWindows()          { return this._directDo(airgap.ventWindowsAction,  'vent-windows'); },
+        directCloseWindows()         { return this._directDo(airgap.closeWindowsAction, 'close-windows'); },
+        // Seat heaters / coolers — position + level
+        directSeatHeater(position, level)  { return this._directDo(() => airgap.setSeatHeaterAction(position, level), `seat-heater:${position}=${level}`); },
+        directSeatCooler(position, level)  { return this._directDo(() => airgap.setSeatCoolerAction(position, level), `seat-cooler:${position}=${level}`); },
+        // Homelink + remote drive
+        directHomelink()             {
+            if (!this.state?.drive?.latitude || !this.state?.drive?.longitude) {
+                notify('Homelink needs car location — fetch /drive state first', 'error');
+                return;
+            }
+            return this._directDo(
+                () => airgap.homelinkAction({ latitude: this.state.drive.latitude, longitude: this.state.drive.longitude }),
+                'homelink',
+            );
+        },
+        directRemoteDrive()          { return this._directDo(airgap.remoteDriveAction, 'remote-drive'); },
+        // Valet (PIN dialog)
+        directValetOn()              { return this._directDo(() => airgap.setValetModeAction(true,  this.valetPin), 'valet-on');  },
+        directValetOff()             { return this._directDo(() => airgap.setValetModeAction(false, this.valetPin), 'valet-off'); },
+        // Speed-limit (PIN dialog)
+        directSpeedLimitActivate()   { return this._directDo(() => airgap.activateSpeedLimitAction(this.speedLimitPin),   'speed-limit-activate');   },
+        directSpeedLimitDeactivate() { return this._directDo(() => airgap.deactivateSpeedLimitAction(this.speedLimitPin), 'speed-limit-deactivate'); },
+        directSpeedLimitClearPin()   { return this._directDo(() => airgap.clearSpeedLimitPinAction(this.speedLimitPin),   'speed-limit-clear-pin');  },
+        directSpeedLimitSet()        { return this._directDo(() => airgap.setSpeedLimitMphAction(Number(this.speedLimitMph)), `speed-limit-set:${this.speedLimitMph}mph`); },
+        // Navigation (dialog)
+        directNavigateGps()          {
+            return this._directDo(() => {
+                const label = (this.navLabel || '').trim();
+                if (label) {
+                    return airgap.navigateGpsWithLabelAction({ lat: Number(this.navLat), lon: Number(this.navLon), label, order: airgap.NAV_ORDER.REPLACE });
+                }
+                return airgap.navigateGpsAction({ lat: Number(this.navLat), lon: Number(this.navLon), order: airgap.NAV_ORDER.REPLACE });
+            }, 'navigate-gps');
+        },
+        directNavigateSearch()       { return this._directDo(() => airgap.navigateSearchAction({ query: (this.navQuery||'').trim(), order: airgap.NAV_ORDER.REPLACE }), 'navigate-search'); },
+        directNavigateWaypoints()    { return this._directDo(() => airgap.navigateWaypointsAction({ waypoints: (this.navWaypoints||'').trim() }), 'navigate-waypoints'); },
+        // Boombox
+        directBoombox(sound)         { return this._directDo(() => airgap.boomboxAction(sound), `boombox:${sound}`); },
+        directBoomboxFromInput()     { return this._directDo(() => airgap.boomboxAction(Number(this.boomboxId)), `boombox:${this.boomboxId}`); },
 
         // enrolKey ships the public half to the Pi for the BLE
         // add-key-request flow. The operator still has to tap the

@@ -516,6 +516,151 @@ async function setChargeLimitAction(percent) {
     return { domain: DOMAIN_INFOTAINMENT, bytes: await _encodeInfotainmentAction({ chargingSetLimitAction: { percent: p } }) };
 }
 
+// ─── Climate keeper / cabin overheat / accessory power / wheel heater ───
+//
+// HvacClimateKeeperAction.keeperId enum: 0=Off, 1=On, 2=Dog, 3=Camp.
+
+const CLIMATE_KEEPER = Object.freeze({ OFF: 0, ON: 1, DOG: 2, CAMP: 3 });
+
+async function setClimateKeeperAction(mode) {
+    const m = Number(mode);
+    if (![0,1,2,3].includes(m)) throw new Error('climate keeper mode must be 0..3');
+    return { domain: DOMAIN_INFOTAINMENT, bytes: await _encodeInfotainmentAction({ hvacClimateKeeperAction: { climateKeeperAction: m } }) };
+}
+async function setCabinOverheatAction(on)     { return { domain: DOMAIN_INFOTAINMENT, bytes: await _encodeInfotainmentAction({ setCabinOverheatProtectionAction: { on: !!on, fanOnly: false } }) }; }
+async function setKeepAccPowerAction(on)      { return { domain: DOMAIN_INFOTAINMENT, bytes: await _encodeInfotainmentAction({ hvacBioweaponModeAction: { on: !!on, manualOverride: false } }) }; }
+async function setSteeringWheelHeaterAction(on){ return { domain: DOMAIN_INFOTAINMENT, bytes: await _encodeInfotainmentAction({ hvacSteeringWheelHeaterAction: { powerOn: !!on } }) }; }
+
+// ─── Windows ───
+// VehicleControlWindowAction.action is a oneof (vent / close / unknown);
+// the Void inner messages just need {} to set the oneof case.
+async function ventWindowsAction() { return { domain: DOMAIN_INFOTAINMENT, bytes: await _encodeInfotainmentAction({ vehicleControlWindowAction: { vent:  {} } }) }; }
+async function closeWindowsAction(){ return { domain: DOMAIN_INFOTAINMENT, bytes: await _encodeInfotainmentAction({ vehicleControlWindowAction: { close: {} } }) }; }
+
+// ─── Seat heater / cooler ───
+//
+// SEAT_POS names mirror the proto's CAR_SEAT_* / HvacSeatCoolerPosition_*
+// enums (heaters and coolers use different enum systems — heaters use
+// a Void oneof, coolers use a numeric enum). Keep both maps so callers
+// can use one vocabulary.
+const SEAT_POS_HEATER = Object.freeze({
+    FRONT_LEFT: 'CAR_SEAT_FRONT_LEFT',
+    FRONT_RIGHT: 'CAR_SEAT_FRONT_RIGHT',
+    REAR_LEFT: 'CAR_SEAT_REAR_LEFT',
+    REAR_CENTER: 'CAR_SEAT_REAR_CENTER',
+    REAR_RIGHT: 'CAR_SEAT_REAR_RIGHT',
+});
+const SEAT_HEATER_LEVEL = Object.freeze({
+    OFF: 'SEAT_HEATER_OFF',
+    LOW: 'SEAT_HEATER_LOW',
+    MED: 'SEAT_HEATER_MED',
+    HIGH: 'SEAT_HEATER_HIGH',
+});
+async function setSeatHeaterAction(position, level) {
+    const p = SEAT_POS_HEATER[position] || position;
+    const l = SEAT_HEATER_LEVEL[level]   || level;
+    return {
+        domain: DOMAIN_INFOTAINMENT,
+        bytes: await _encodeInfotainmentAction({
+            hvacSeatHeaterActions: {
+                hvacSeatHeaterAction: [{ [l]: {}, [p]: {} }],
+            },
+        }),
+    };
+}
+
+// Cooler enum is numeric: 1=Off, 2=Low, 3=Med, 4=High. Positions are
+// FrontLeft=1, FrontRight=2.
+const SEAT_COOLER_LEVEL = Object.freeze({ OFF: 1, LOW: 2, MED: 3, HIGH: 4 });
+const SEAT_COOLER_POS   = Object.freeze({ FRONT_LEFT: 1, FRONT_RIGHT: 2 });
+async function setSeatCoolerAction(position, level) {
+    const p = SEAT_COOLER_POS[position]   ?? position;
+    const l = SEAT_COOLER_LEVEL[level]    ?? level;
+    return {
+        domain: DOMAIN_INFOTAINMENT,
+        bytes: await _encodeInfotainmentAction({
+            hvacSeatCoolerActions: {
+                hvacSeatCoolerAction: [{ seatPosition: p, seatCoolerLevel: l }],
+            },
+        }),
+    };
+}
+
+// ─── Homelink / remote drive ───
+async function homelinkAction({ latitude, longitude }) {
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+        throw new Error('homelink needs valid lat/lon');
+    }
+    return {
+        domain: DOMAIN_INFOTAINMENT,
+        bytes: await _encodeInfotainmentAction({
+            vehicleControlTriggerHomelinkAction: { location: { latitude, longitude } },
+        }),
+    };
+}
+async function remoteDriveAction() {
+    return { domain: DOMAIN_INFOTAINMENT, bytes: await _encodeInfotainmentAction({ vehicleControlRemoteStartAction: {} }) };
+}
+
+// ─── Valet / speed-limit (PIN-protected) ───
+function _validatePin(pin) {
+    const p = (pin || '').toString();
+    if (!/^\d{4}$/.test(p)) throw new Error('PIN must be exactly 4 digits');
+    return p;
+}
+async function setValetModeAction(on, pin) {
+    const p = _validatePin(pin);
+    return { domain: DOMAIN_INFOTAINMENT, bytes: await _encodeInfotainmentAction({ vehicleControlSetValetModeAction: { on: !!on, password: p } }) };
+}
+async function activateSpeedLimitAction(pin) {
+    return { domain: DOMAIN_INFOTAINMENT, bytes: await _encodeInfotainmentAction({ drivingSpeedLimitAction: { activate: true,  pin: _validatePin(pin) } }) };
+}
+async function deactivateSpeedLimitAction(pin) {
+    return { domain: DOMAIN_INFOTAINMENT, bytes: await _encodeInfotainmentAction({ drivingSpeedLimitAction: { activate: false, pin: _validatePin(pin) } }) };
+}
+async function clearSpeedLimitPinAction(pin) {
+    return { domain: DOMAIN_INFOTAINMENT, bytes: await _encodeInfotainmentAction({ drivingClearSpeedLimitPinAction: { pin: _validatePin(pin) } }) };
+}
+async function setSpeedLimitMphAction(mph) {
+    const m = Number(mph);
+    if (!Number.isFinite(m) || m < 50 || m > 90) throw new Error('speed limit must be 50..90 mph');
+    return { domain: DOMAIN_INFOTAINMENT, bytes: await _encodeInfotainmentAction({ drivingSetSpeedLimitAction: { limitMph: m } }) };
+}
+
+// ─── Navigation (4 forms — from the SDK fork) ───
+//
+// Order enums are nested per message in protobuf.js, so we use
+// numeric values directly. REPLACE=1, PREPEND=2, APPEND=3.
+const NAV_ORDER = Object.freeze({ REPLACE: 1, PREPEND: 2, APPEND: 3 });
+
+async function navigateGpsAction({ lat, lon, order }) {
+    return { domain: DOMAIN_INFOTAINMENT, bytes: await _encodeInfotainmentAction({
+        navigationGpsRequest: { lat: Number(lat), lon: Number(lon), order: order || NAV_ORDER.REPLACE },
+    }) };
+}
+async function navigateGpsWithLabelAction({ lat, lon, label, order }) {
+    return { domain: DOMAIN_INFOTAINMENT, bytes: await _encodeInfotainmentAction({
+        navigationGpsDestinationRequest: { lat: Number(lat), lon: Number(lon), destination: label || '', order: order || NAV_ORDER.REPLACE },
+    }) };
+}
+async function navigateSearchAction({ query, order }) {
+    return { domain: DOMAIN_INFOTAINMENT, bytes: await _encodeInfotainmentAction({
+        navigationRequest: { destination: query, order: order || NAV_ORDER.REPLACE },
+    }) };
+}
+async function navigateWaypointsAction({ waypoints }) {
+    return { domain: DOMAIN_INFOTAINMENT, bytes: await _encodeInfotainmentAction({
+        navigationWaypointsRequest: { waypoints },
+    }) };
+}
+
+// ─── Boombox ───
+async function boomboxAction(sound) {
+    const s = Number(sound);
+    if (!Number.isInteger(s) || s < 0 || s > 65535) throw new Error('sound must be 0..65535');
+    return { domain: DOMAIN_INFOTAINMENT, bytes: await _encodeInfotainmentAction({ boomboxAction: { sound: s } }) };
+}
+
 // ─── State-read actions ───
 // Each wraps a GetVehicleData sub-message; the car responds with a
 // CarServer.Response carrying the requested data. Domain is always
@@ -586,6 +731,36 @@ Object.assign(window.airgap, {
     lockAction, unlockAction, wakeAction,
     openFrunkAction, openTrunkAction, closeTrunkAction,
     openChargePortAction, closeChargePortAction,
+
+    // Climate / comfort
+    setClimateKeeperAction, setCabinOverheatAction,
+    setKeepAccPowerAction, setSteeringWheelHeaterAction,
+    CLIMATE_KEEPER,
+
+    // Windows
+    ventWindowsAction, closeWindowsAction,
+
+    // Seat heater + cooler
+    setSeatHeaterAction, setSeatCoolerAction,
+    SEAT_POS_HEATER, SEAT_HEATER_LEVEL,
+    SEAT_COOLER_POS, SEAT_COOLER_LEVEL,
+
+    // Homelink, remote drive
+    homelinkAction, remoteDriveAction,
+
+    // Valet + speed-limit (PIN-protected)
+    setValetModeAction,
+    activateSpeedLimitAction, deactivateSpeedLimitAction,
+    clearSpeedLimitPinAction, setSpeedLimitMphAction,
+
+    // Navigation
+    navigateGpsAction, navigateGpsWithLabelAction,
+    navigateSearchAction, navigateWaypointsAction,
+    NAV_ORDER,
+
+    // Boombox
+    boomboxAction,
+
     // State reads.
     getChargeStateAction, getClimateStateAction, getDriveStateAction,
 });

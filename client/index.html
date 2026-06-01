@@ -336,6 +336,223 @@
                     </div>
                 </div>
 
+                <!-- Comfort (Thread C-3) -->
+                <div class="card">
+                    <div class="card-head">
+                        <div>
+                            <div class="card-head-title">Comfort</div>
+                            <div class="card-head-sub">Climate keeper · cabin overheat · keep accessory power · steering wheel heater</div>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <div class="row-wrap" style="margin-bottom:10px;">
+                            <button class="btn ghost" @click="directSetClimateKeeper(airgap.CLIMATE_KEEPER.OFF)">Keeper · Off</button>
+                            <button class="btn ghost" @click="directSetClimateKeeper(airgap.CLIMATE_KEEPER.ON)">Keeper · On</button>
+                            <button class="btn ghost" @click="directSetClimateKeeper(airgap.CLIMATE_KEEPER.DOG)">Dog mode</button>
+                            <button class="btn ghost" @click="directSetClimateKeeper(airgap.CLIMATE_KEEPER.CAMP)">Camp mode</button>
+                        </div>
+                        <div class="row-wrap" style="margin-bottom:10px;">
+                            <button class="btn ghost" @click="directSetCabinOverheat(true)">Cabin overheat ON</button>
+                            <button class="btn ghost" @click="directSetCabinOverheat(false)">Cabin overheat OFF</button>
+                            <button class="btn ghost" @click="directKeepAccPowerOn()">Keep acc. power ON</button>
+                            <button class="btn ghost" @click="directKeepAccPowerOff()">Keep acc. power OFF</button>
+                        </div>
+                        <div class="row-wrap">
+                            <button class="btn ghost" @click="directWheelHeaterOn()">Wheel heater ON</button>
+                            <button class="btn ghost" @click="directWheelHeaterOff()">Wheel heater OFF</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Windows -->
+                <div class="card">
+                    <div class="card-head">
+                        <div>
+                            <div class="card-head-title">Windows</div>
+                            <div class="card-head-sub">Vent (~5cm open) or close all four</div>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <div class="row-wrap">
+                            <button class="btn" @click="directVentWindows()">Vent</button>
+                            <button class="btn" @click="directCloseWindows()">Close</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Seat heater + cooler -->
+                <div class="card">
+                    <div class="card-head">
+                        <div>
+                            <div class="card-head-title">Seat climate</div>
+                            <div class="card-head-sub">Heaters (5 positions × Off/Low/Med/High) and coolers (front pair)</div>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <template x-for="pos in ['FRONT_LEFT','FRONT_RIGHT','REAR_LEFT','REAR_CENTER','REAR_RIGHT']" :key="pos">
+                            <div class="row" style="gap:8px; margin-bottom:8px;">
+                                <span class="meta" style="min-width:120px;" x-text="pos.replace('_',' ').toLowerCase()"></span>
+                                <button class="btn sm ghost" @click="directSeatHeater(pos, 'OFF')">Off</button>
+                                <button class="btn sm ghost" @click="directSeatHeater(pos, 'LOW')">Low</button>
+                                <button class="btn sm ghost" @click="directSeatHeater(pos, 'MED')">Med</button>
+                                <button class="btn sm ghost" @click="directSeatHeater(pos, 'HIGH')">High</button>
+                            </div>
+                        </template>
+                        <hr style="border:0; border-top:1px solid var(--line); margin:12px 0;">
+                        <template x-for="pos in ['FRONT_LEFT','FRONT_RIGHT']" :key="'c-'+pos">
+                            <div class="row" style="gap:8px; margin-bottom:8px;">
+                                <span class="meta" style="min-width:120px;" x-text="'cool ' + pos.replace('_',' ').toLowerCase()"></span>
+                                <button class="btn sm ghost" @click="directSeatCooler(pos, 'OFF')">Off</button>
+                                <button class="btn sm ghost" @click="directSeatCooler(pos, 'LOW')">Low</button>
+                                <button class="btn sm ghost" @click="directSeatCooler(pos, 'MED')">Med</button>
+                                <button class="btn sm ghost" @click="directSeatCooler(pos, 'HIGH')">High</button>
+                            </div>
+                        </template>
+                    </div>
+                </div>
+
+                <!-- Security & access -->
+                <div class="card">
+                    <div class="card-head">
+                        <div>
+                            <div class="card-head-title">Security &amp; access</div>
+                            <div class="card-head-sub">Homelink · remote drive · valet · speed limit (PIN-gated)</div>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <div class="row-wrap">
+                            <button class="btn ghost" @click="directHomelink()"
+                                    title="Triggers your home garage opener. Needs the car's current location — hit Refresh state first.">Homelink</button>
+                            <button class="btn ghost" @click="directRemoteDrive()"
+                                    title="Remote-start primer (~2 min). Doesn't move the car.">Remote drive</button>
+                            <button class="btn ghost" @click="valetDialogOpen = true; valetPin = ''">Valet…</button>
+                            <button class="btn ghost" @click="speedLimitDialogOpen = true; speedLimitPin = ''">Speed limit…</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Send navigation -->
+                <div class="card">
+                    <div class="card-head">
+                        <div>
+                            <div class="card-head-title">Send navigation</div>
+                            <div class="card-head-sub">GPS coords (best), free-text search, or Google place-IDs waypoint string</div>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <div class="chip-row" style="margin-bottom:14px;">
+                            <button class="chip" :class="navMode==='gps'?'active':''" @click="navMode='gps'">GPS</button>
+                            <button class="chip" :class="navMode==='search'?'active':''" @click="navMode='search'">Search</button>
+                            <button class="chip" :class="navMode==='waypoints'?'active':''" @click="navMode='waypoints'">Waypoints</button>
+                        </div>
+                        <template x-if="navMode==='gps'">
+                            <div>
+                                <div class="form-row" style="gap:10px; margin-bottom:8px;">
+                                    <input type="number" step="0.000001" class="input mono" x-model.number="navLat" placeholder="latitude"  style="max-width:180px;">
+                                    <input type="number" step="0.000001" class="input mono" x-model.number="navLon" placeholder="longitude" style="max-width:180px;">
+                                    <button class="btn ghost" @click="if(state?.drive){navLat=state.drive.latitude;navLon=state.drive.longitude;}"
+                                            :disabled="!state?.drive">Use car position</button>
+                                </div>
+                                <div class="form-row" style="gap:10px;">
+                                    <input class="input" x-model="navLabel" placeholder="optional label (e.g. 'Home')" style="max-width:280px;">
+                                    <button class="btn primary" @click="directNavigateGps()" :disabled="!navLat || !navLon">Send to car</button>
+                                </div>
+                            </div>
+                        </template>
+                        <template x-if="navMode==='search'">
+                            <div class="form-row" style="gap:10px;">
+                                <input class="input" x-model="navQuery" placeholder="e.g. 'nearest Supercharger'" style="flex:1;">
+                                <button class="btn primary" @click="directNavigateSearch()" :disabled="!navQuery">Send to car</button>
+                            </div>
+                        </template>
+                        <template x-if="navMode==='waypoints'">
+                            <div>
+                                <input class="input mono" x-model="navWaypoints" placeholder="refId:ChIJ…,refId:ChIJ…">
+                                <button class="btn primary" style="margin-top:10px;" @click="directNavigateWaypoints()" :disabled="!navWaypoints">Send to car</button>
+                                <div class="enrol-help" style="margin-top:8px;">
+                                    Comma-separated Google Place IDs prefixed with <code>refId:</code>. Last entry is the destination; earlier entries are stops.
+                                </div>
+                            </div>
+                        </template>
+                    </div>
+                </div>
+
+                <!-- Boombox -->
+                <div class="card">
+                    <div class="card-head">
+                        <div>
+                            <div class="card-head-title">Boombox</div>
+                            <div class="card-head-sub">External pedestrian-warning speaker. IDs vary by firmware — try a few.</div>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <div class="row-wrap">
+                            <template x-for="s in [0,1,2,3,4,5,6,7,8]" :key="s">
+                                <button class="btn ghost" @click="directBoombox(s)" x-text="'Sound ' + s"></button>
+                            </template>
+                        </div>
+                        <div class="form-row" style="gap:8px; margin-top:10px; align-items:center;">
+                            <input type="number" class="input" min="0" max="65535" step="1"
+                                   x-model.number="boomboxId" placeholder="Sound ID" style="max-width:140px;">
+                            <button class="btn ghost" @click="directBoomboxFromInput()"
+                                    :disabled="boomboxId === null || boomboxId === '' || boomboxId < 0">Play</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Valet dialog -->
+                <div class="dialog-back" x-show="valetDialogOpen" x-cloak @keydown.escape.window="valetDialogOpen = false">
+                    <div class="dialog">
+                        <div class="dialog-head">
+                            <div class="dialog-title">Valet mode</div>
+                            <button class="dialog-close" @click="valetDialogOpen = false">&times;</button>
+                        </div>
+                        <div class="dialog-body">
+                            <p style="margin:0 0 12px; color:var(--fg-dim);">Limits acceleration, max speed, and disables Autopilot. PIN required to enable AND disable.</p>
+                            <input type="password" inputmode="numeric" pattern="\d{4}" maxlength="4"
+                                   class="input mono" x-model="valetPin" placeholder="4-digit PIN" style="width:160px;">
+                        </div>
+                        <div class="dialog-foot">
+                            <button class="btn ghost" @click="valetDialogOpen = false">Cancel</button>
+                            <button class="btn danger" :disabled="valetPin.length !== 4"
+                                    @click="directValetOff(); valetDialogOpen = false">Disable</button>
+                            <button class="btn primary" :disabled="valetPin.length !== 4"
+                                    @click="directValetOn(); valetDialogOpen = false">Enable</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Speed-limit dialog -->
+                <div class="dialog-back" x-show="speedLimitDialogOpen" x-cloak @keydown.escape.window="speedLimitDialogOpen = false">
+                    <div class="dialog">
+                        <div class="dialog-head">
+                            <div class="dialog-title">Speed limit</div>
+                            <button class="dialog-close" @click="speedLimitDialogOpen = false">&times;</button>
+                        </div>
+                        <div class="dialog-body">
+                            <p style="margin:0 0 12px; color:var(--fg-dim);">Cap the car's max speed with a 4-digit PIN. Activate/deactivate AND clearing the PIN itself all require the PIN.</p>
+                            <div class="form-row" style="gap:10px; margin-bottom:10px;">
+                                <input type="number" min="50" max="90" step="1" class="input" x-model.number="speedLimitMph"
+                                       placeholder="MPH" style="width:120px;">
+                                <span class="meta">mph (50–90)</span>
+                            </div>
+                            <input type="password" inputmode="numeric" pattern="\d{4}" maxlength="4"
+                                   class="input mono" x-model="speedLimitPin" placeholder="4-digit PIN" style="width:160px;">
+                        </div>
+                        <div class="dialog-foot" style="flex-wrap:wrap;">
+                            <button class="btn ghost" @click="speedLimitDialogOpen = false">Cancel</button>
+                            <button class="btn" :disabled="!speedLimitMph || speedLimitMph<50 || speedLimitMph>90"
+                                    @click="directSpeedLimitSet()">Set MPH</button>
+                            <button class="btn primary" :disabled="speedLimitPin.length !== 4"
+                                    @click="directSpeedLimitActivate(); speedLimitDialogOpen = false">Activate</button>
+                            <button class="btn" :disabled="speedLimitPin.length !== 4"
+                                    @click="directSpeedLimitDeactivate(); speedLimitDialogOpen = false">Deactivate</button>
+                            <button class="btn danger" :disabled="speedLimitPin.length !== 4"
+                                    @click="directSpeedLimitClearPin(); speedLimitDialogOpen = false">Clear PIN</button>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- Device key (Phase 3a) -->
                 <div class="card">
                     <div class="card-head">
