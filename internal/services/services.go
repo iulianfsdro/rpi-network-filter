@@ -13,32 +13,43 @@ type Services struct {
 	Network    *NetworkService
 	Firewall   *FirewallService
 	DNS        *DNSService
-	Blocked    *BlockedService
 	Bandwidth  *BandwidthService
 	Hotspot    *HotspotService
 	System     *SystemService
 	Audit      *AuditService
 	TrafficLog *TrafficLogService
-	Policy     *PolicyService
+	Filter     *FilterService
+	Spoof      *SpoofService
+	SNIProxy   *SNIProxyService
+	Tesla       *TeslaService
+	TeslaToken  *TeslaTokenService
+	BLESession  *BLESessionService
+	Remote      *RemoteService
 }
 
 func New(db *sql.DB, exec *executor.Executor, cfg config.Config) *Services {
 	audit := NewAuditService(db)
 	trafficLog := NewTrafficLogService(db)
-	blocked := NewBlockedService(db)
-	policy := NewPolicyService(db, blocked)
+	filter := NewFilterService(db)
+	network := NewNetworkService(db, cfg)
+	tesla := NewTeslaService(db, audit)
 	return &Services{
 		Auth:       NewAuthService(db),
-		Network:    NewNetworkService(db, cfg),
-		Firewall:   NewFirewallService(db, exec, cfg, blocked, policy),
-		DNS:        NewDNSService(db, exec, blocked),
-		Blocked:    blocked,
+		Network:    network,
+		Firewall:   NewFirewallService(db, exec, cfg),
+		DNS:        NewDNSService(db, exec, cfg),
 		Bandwidth:  NewBandwidthService(db, exec, cfg),
 		Hotspot:    NewHotspotService(db, exec),
 		System:     NewSystemService(exec, cfg),
 		Audit:      audit,
 		TrafficLog: trafficLog,
-		Policy:     policy,
+		Filter:     filter,
+		Spoof:      NewSpoofService(cfg, exec),
+		SNIProxy:   NewSNIProxyService(cfg, db, trafficLog),
+		Tesla:      tesla,
+		TeslaToken: NewTeslaTokenService(db),
+		BLESession: NewBLESessionService(tesla),
+		Remote:     NewRemoteService(),
 	}
 }
 
@@ -47,7 +58,7 @@ func (s *Services) ApplyAll() {
 		log.Printf("[WARN] Failed to apply firewall rules: %v", err)
 	}
 	if err := s.DNS.Apply(); err != nil {
-		log.Printf("[WARN] Failed to apply DNS blocklist: %v", err)
+		log.Printf("[WARN] Failed to apply DNS config: %v", err)
 	}
 	if err := s.Bandwidth.Apply(); err != nil {
 		log.Printf("[WARN] Failed to apply bandwidth limits: %v", err)

@@ -21,13 +21,17 @@ type Config struct {
 	DHCPRangeStart string `yaml:"dhcp_range_start"`
 	DHCPRangeEnd   string `yaml:"dhcp_range_end"`
 	DNSUpstream   string `yaml:"dns_upstream"`
+	SNIProxyPort  int    `yaml:"sni_proxy_port"`
 	DryRun        bool   `yaml:"dry_run"`
 	LogLevel      string `yaml:"log_level"`
 }
 
 func Defaults() Config {
 	return Config{
-		ListenAddr:     "192.168.4.1:80",
+		// Bind on all interfaces by default so Tailscale (tailscale0) can
+		// reach the UI without the operator having to remember to
+		// rewrite the address. Per-interface ACL lives in the firewall.
+		ListenAddr:     ":80",
 		UseTLS:         false,
 		TLSCert:        "/etc/netfilterd/server.crt",
 		TLSKey:         "/etc/netfilterd/server.key",
@@ -39,6 +43,7 @@ func Defaults() Config {
 		DHCPRangeStart: "192.168.4.100",
 		DHCPRangeEnd:   "192.168.4.250",
 		DNSUpstream:    "1.1.1.1,8.8.8.8",
+		SNIProxyPort:   8444,
 		DryRun:         false,
 		LogLevel:       "info",
 	}

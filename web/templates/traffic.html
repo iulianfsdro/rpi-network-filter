@@ -1,148 +1,239 @@
-{{define "title"}}Traffic Monitor{{end}}
+{{define "title"}}Traffic{{end}}
 
 {{define "content"}}
 <div x-data="trafficApp()" x-init="load()">
-    <!-- Top controls -->
-    <div style="display:flex; gap:0.5rem; align-items:center; flex-wrap:wrap; margin-bottom:1rem;">
-        <span class="badge" :class="live ? 'badge-success' : 'badge-muted'">
-            <span x-show="live">● LIVE</span>
-            <span x-show="!live">⏸ PAUSED</span>
-        </span>
-        <span style="font-size:0.85rem; color:var(--text-muted);">
-            Showing <strong x-text="entries.length"></strong> of
-            <strong x-text="total.toLocaleString()"></strong> total
-        </span>
-        <div style="flex:1"></div>
-        <button type="button" class="outline btn-sm" @click="togglePause()" x-text="live ? 'Pause' : 'Resume'"></button>
-        <button type="button" class="outline btn-sm" @click="load()">Refresh</button>
-        <button type="button" class="outline btn-sm" style="color:var(--danger);" @click="clearLog()">Clear Log</button>
+    <div class="page-head">
+        <div>
+            <div class="page-head-eyebrow"><strong>Surveillance</strong> · raw event stream</div>
+            <h1 class="page-head-title">Traffic</h1>
+            <p class="page-head-sub">
+                Every DNS query and every forward verdict. Live-tails every 3 s while not paused.
+                Use the per-row <strong>Allow</strong> button to stage a domain on a filter (with
+                a required description); <strong>Mute</strong> to drop a domain from the monitor
+                without changing firewall behaviour.
+            </p>
+        </div>
+        <div class="page-head-right">
+            <button class="btn" @click="openMuted()" x-text="'Muted · ' + (muted.length || 0)"></button>
+            <button class="btn danger" @click="confirmClear = true" :disabled="total === 0">Clear logs</button>
+        </div>
     </div>
 
-    <!-- Source tabs (DNS events vs firewall/forward events) -->
-    <div style="display:flex; gap:0; margin-bottom:1rem; border-bottom:1px solid var(--surface-3);">
-        <button type="button"
-                :class="filter.source === '' ? 'btn-tab btn-tab-active' : 'btn-tab'"
-                style="background:transparent; border:0; border-bottom:2px solid transparent; padding:0.5rem 1rem; cursor:pointer; color:var(--text);"
-                :style="filter.source === '' ? 'border-bottom-color: var(--primary); color: var(--primary);' : ''"
-                @click="setSource('')">All</button>
-        <button type="button"
-                style="background:transparent; border:0; border-bottom:2px solid transparent; padding:0.5rem 1rem; cursor:pointer; color:var(--text);"
-                :style="filter.source === 'dns' ? 'border-bottom-color: var(--primary); color: var(--primary);' : ''"
-                @click="setSource('dns')">DNS queries</button>
-        <button type="button"
-                style="background:transparent; border:0; border-bottom:2px solid transparent; padding:0.5rem 1rem; cursor:pointer; color:var(--text);"
-                :style="filter.source === 'forward' ? 'border-bottom-color: var(--primary); color: var(--primary);' : ''"
-                @click="setSource('forward')">Firewall decisions</button>
-    </div>
+    <div class="card" style="overflow:visible;">
+        <div class="traffic-toolbar">
+            <span class="live-indicator" :class="live ? '' : 'paused'" @click="togglePause()" x-text="live ? 'Live' : 'Paused'"></span>
+            <button class="btn sm" @click="togglePause()" x-text="live ? 'Pause' : 'Resume'"></button>
 
-    <!-- Filters -->
-    <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(160px, 1fr)); gap:0.5rem; margin-bottom:1rem;">
-        <label style="margin:0;">
-            Action
-            <select x-model="filter.action" @change="page=1; load()">
-                <option value="">All</option>
-                <option value="query">DNS queries</option>
-                <option value="blocked">Blocked</option>
-                <option value="allowed">Allowed</option>
+            <div class="chip-row">
+                <button class="chip" :class="filter.kind === ''    ? 'active' : ''" @click="setKind('')"   >All</button>
+                <button class="chip" :class="filter.kind === 'dns' ? 'active' : ''" @click="setKind('dns')">DNS</button>
+                <button class="chip" :class="filter.kind === 'tls' ? 'active' : ''" @click="setKind('tls')">TLS</button>
+                <button class="chip" :class="filter.kind === 'tcp' ? 'active' : ''" @click="setKind('tcp')">TCP</button>
+                <button class="chip" :class="filter.kind === 'udp' ? 'active' : ''" @click="setKind('udp')">UDP</button>
+            </div>
+
+            <select class="select" style="width:180px;" x-model="filter.action" @change="page=1; load()">
+                <option value="">Action · all</option>
+                <option value="query">query</option>
+                <option value="allowed">allowed</option>
+                <option value="blocked">blocked</option>
+                <option value="logged">logged</option>
             </select>
-        </label>
-        <label style="margin:0;">
-            Search
-            <input type="search" x-model.debounce.500ms="filter.q" @input="page=1; load()" placeholder="IP, domain, port...">
-        </label>
-        <label style="margin:0;">
-            From
-            <input type="datetime-local" x-model="filter.from" @change="page=1; load()">
-        </label>
-        <label style="margin:0;">
-            To
-            <input type="datetime-local" x-model="filter.to" @change="page=1; load()">
-        </label>
-        <label style="margin:0;">
-            Per page
-            <select x-model.number="perPage" @change="page=1; load()">
-                <option value="25">25</option>
-                <option value="50">50</option>
-                <option value="100">100</option>
-                <option value="200">200</option>
-                <option value="500">500</option>
-            </select>
-        </label>
-    </div>
 
-    <!-- Table -->
-    <div style="overflow-x:auto;">
-        <table>
+            <input class="input" style="width:280px;" placeholder="Search domain · client · IP · port" x-model="filter.q" @keydown.enter="page=1; load()" @input.debounce.300ms="page=1; load()">
+
+            <span style="flex:1;"></span>
+            <span style="font-size:11.5px; color:var(--fg-mute);">
+                <span x-text="total.toLocaleString()"></span> events · page <span x-text="page"></span> / <span x-text="pages"></span>
+            </span>
+        </div>
+
+        <table class="tbl">
             <thead>
                 <tr>
-                    <th style="width:155px;">Time</th>
-                    <th>Source IP</th>
-                    <th>Domain / Dest IP</th>
-                    <th style="width:70px;">Port</th>
+                    <th style="width:84px;">Time</th>
+                    <th style="width:80px;">Src</th>
+                    <th style="width:170px;">Client</th>
+                    <th>Domain</th>
+                    <th style="width:60px;">Port</th>
                     <th style="width:70px;">Proto</th>
-                    <th style="width:90px;">Action</th>
-                    <th style="width:100px;">Quick</th>
+                    <th style="width:110px;">Action</th>
+                    <th style="width:180px;" class="right">Review</th>
                 </tr>
             </thead>
             <tbody>
                 <template x-for="e in entries" :key="e.id">
-                    <tr :class="{
-                        'row-blocked': e.action === 'blocked',
-                        'row-allowed': e.action === 'allowed'
-                    }">
-                        <td style="font-size:0.75rem; white-space:nowrap; color:var(--text-muted);" x-text="fmtTime(e.timestamp)"></td>
-                        <td><code x-text="e.src_ip || '-'" style="font-size:0.82rem;"></code></td>
+                    <tr>
+                        <td class="cell-mac" x-text="fmtTime(e.timestamp)"></td>
+                        <td><span class="badge" :class="e.source === 'dns' ? 'info' : 'muted'" x-text="e.source"></span></td>
                         <td>
+                            <div class="cell-primary" x-text="clientLabel(e)"></div>
+                            <div class="cell-sub cell-mac" x-text="clientSub(e)"></div>
+                        </td>
+                        <td>
+                            <span style="color:var(--fg);" x-text="e.domain || '—'"></span>
+                            <template x-if="e.dst_ip"><div class="cell-sub">→ <span x-text="e.dst_ip"></span></div></template>
+                        </td>
+                        <td class="cell-mac" x-text="e.dst_port"></td>
+                        <td class="cell-mac" x-text="e.protocol"></td>
+                        <td><span class="traffic-row-action" :class="actionClass(e)" x-text="actionDisplay(e)" :title="actionTooltip(e)"></span></td>
+                        <td class="actions">
+                            <template x-if="e.domain && allowState(e) === 'allowed'">
+                                <span class="badge success dot" title="Allowed via an enabled filter">Allowed</span>
+                            </template>
+                            <template x-if="e.domain && allowState(e) === 'pending'">
+                                <span class="badge muted dot" title="Staged in a filter but disabled — toggle on under /filters">Pending</span>
+                            </template>
+                            <template x-if="e.domain && allowState(e) === 'protected'">
+                                <span class="badge danger dot" title="protected-deny floor · never allow-listable">protected</span>
+                            </template>
+                            <template x-if="e.domain && allowState(e) === 'addable'">
+                                <button class="btn sm" @click="openAllow(e.domain)">+ Allow</button>
+                            </template>
                             <template x-if="e.domain">
-                                <div>
-                                    <span style="font-weight:600;" x-text="e.domain"></span>
-                                    <template x-if="e.dst_ip">
-                                        <small style="color:var(--text-muted); display:block; font-size:0.75rem;" x-text="e.dst_ip"></small>
-                                    </template>
-                                </div>
-                            </template>
-                            <template x-if="!e.domain">
-                                <code x-text="e.dst_ip || '-'" style="font-size:0.82rem;"></code>
-                            </template>
-                        </td>
-                        <td><code x-text="e.dst_port || '-'" style="font-size:0.82rem;"></code></td>
-                        <td style="font-size:0.82rem;" x-text="e.protocol || '-'"></td>
-                        <td>
-                            <span class="badge" :class="{
-                                'badge-danger': e.action === 'blocked',
-                                'badge-success': e.action === 'allowed',
-                                'badge-info': e.action === 'query',
-                                'badge-muted': e.action === 'logged'
-                            }" x-text="e.action"></span>
-                        </td>
-                        <td>
-                            <template x-if="e.action === 'query' && e.domain">
-                                <button type="button" class="outline btn-sm" @click="quickAllow(e.domain)" style="font-size:0.72rem;">Allow</button>
-                            </template>
-                            <template x-if="e.action === 'blocked' && e.domain">
-                                <button type="button" class="outline btn-sm" @click="quickAllow(e.domain)" style="font-size:0.72rem;">Allow</button>
+                                <button class="btn sm ghost" @click="muteDomain(e.domain)">Mute</button>
                             </template>
                         </td>
                     </tr>
                 </template>
+                <template x-if="entries.length === 0 && !loading">
+                    <tr><td colspan="8" style="text-align:center; color:var(--fg-mute); padding:48px 20px; font-size:13px;"
+                            x-text="total === 0
+                                ? 'Log is empty. New events will appear here as soon as a device sends a DNS query or makes a forward attempt.'
+                                : 'No events match the current filters.'"></td></tr>
+                </template>
             </tbody>
         </table>
+
+        <div style="display:flex; gap:10px; align-items:center; padding:14px 18px; border-top:1px solid var(--line); background:var(--bg-elev);" x-show="pages > 1">
+            <button class="btn sm" :disabled="page <= 1" @click="page = Math.max(1, page-1); load()">← Prev</button>
+            <span style="font-size:11.5px; color:var(--fg-mute);">Page <span x-text="page"></span> of <span x-text="pages"></span></span>
+            <button class="btn sm" :disabled="page >= pages" @click="page = Math.min(pages, page+1); load()">Next →</button>
+        </div>
     </div>
 
-    <p x-show="entries.length === 0 && !loading" style="text-align:center; color:var(--text-muted); padding:2rem;">
-        <span x-show="total === 0">No traffic logged yet. Connect a device and try to browse.</span>
-        <span x-show="total > 0">No entries match your filters.</span>
-    </p>
+    <!-- Allow → pick filter dialog -->
+    <div class="dialog-back" x-show="allowFor" x-cloak @click.self="closeAllow()">
+        <div class="dialog wide">
+            <div class="dialog-head">
+                <div class="dialog-title">Allow <code x-text="allowFor"></code></div>
+                <button class="dialog-close" @click="closeAllow()">
+                    <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 3l10 10M13 3L3 13"/></svg>
+                </button>
+            </div>
+            <div class="dialog-body">
+                <template x-if="isProtected(allowFor)">
+                    <div class="protected-banner">
+                        <strong>Protected-deny floor.</strong> <code x-text="allowFor"></code> is on the
+                        hardcoded Tesla endpoint list — Hermes, OTA, telemetry, manufacturing or
+                        engineering host. It cannot be allow-listed from the UI by design. Letting
+                        one of these connect once is enough to brick the car remotely.
+                    </div>
+                </template>
+                <div class="field-help" style="margin-bottom:18px;">
+                    Pick the filter list this domain belongs in. Filters apply <strong>globally</strong>
+                    to every Filtered device, so put domains under the service they serve (YouTube
+                    hosts under YouTube, Tesla nav under Tesla AP/Nav, etc.).
+                </div>
+                <div class="field">
+                    <label class="label">Target filter</label>
+                    <select class="select" x-model="allowFilterId">
+                        <template x-for="f in filters" :key="f.id">
+                            <option :value="f.id" x-text="f.name + ' (' + (f.enabled ? 'on' : 'off') + ')'"></option>
+                        </template>
+                        <option value="new">＋ Create a new filter list…</option>
+                    </select>
+                </div>
+                <div class="mini-form" x-show="allowFilterId === 'new'" x-cloak>
+                    <div class="field">
+                        <label class="label">New filter · name</label>
+                        <input class="input" x-model="newFilterForm.name" placeholder="e.g. Apple Music">
+                    </div>
+                    <div class="field" style="margin-bottom:4px;">
+                        <label class="label">New filter · description</label>
+                        <textarea class="textarea" x-model="newFilterForm.description" placeholder="What does this filter unlock?"></textarea>
+                        <div class="field-help">The new filter starts <strong>off</strong> — flip it on under /filters once contents are reviewed.</div>
+                    </div>
+                </div>
+                <div class="field" style="margin-top:18px;">
+                    <label class="label">Why this domain?</label>
+                    <input class="input" x-model="allowWhy" placeholder="e.g. Netflix video CDN — required for playback">
+                    <div class="field-help">The domain is added <strong>disabled</strong>. Flip it on under /filters after a final read-over.</div>
+                </div>
+            </div>
+            <div class="dialog-foot">
+                <button class="btn ghost" @click="closeAllow()">Cancel</button>
+                <button class="btn primary" @click="submitAllow()" :disabled="isProtected(allowFor)">Add to filter</button>
+            </div>
+        </div>
+    </div>
 
-    <!-- Pagination -->
-    <div x-show="pages > 1" style="display:flex; justify-content:center; align-items:center; gap:0.5rem; margin-top:1rem; flex-wrap:wrap;">
-        <button type="button" class="outline btn-sm" :disabled="page === 1" @click="page=1; load()">« First</button>
-        <button type="button" class="outline btn-sm" :disabled="page === 1" @click="page--; load()">‹ Prev</button>
-        <span style="font-size:0.85rem; color:var(--text-muted);">
-            Page <strong x-text="page"></strong> of <strong x-text="pages"></strong>
-        </span>
-        <button type="button" class="outline btn-sm" :disabled="page === pages" @click="page++; load()">Next ›</button>
-        <button type="button" class="outline btn-sm" :disabled="page === pages" @click="page=pages; load()">Last »</button>
+    <!-- Clear-logs confirm -->
+    <div class="dialog-back" x-show="confirmClear" x-cloak @click.self="confirmClear = false">
+        <div class="dialog">
+            <div class="dialog-head">
+                <div class="dialog-title">Clear traffic log?</div>
+                <button class="dialog-close" @click="confirmClear = false">
+                    <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 3l10 10M13 3L3 13"/></svg>
+                </button>
+            </div>
+            <div class="dialog-body">
+                <div style="font-size:13.5px; line-height:1.6; color:var(--fg-dim);">
+                    Wipe all <strong style="color:var(--fg);" x-text="total.toLocaleString()"></strong> events from the traffic monitor.
+                    This drops the on-disk <code>query_log</code> table. Firewall rules, filters, devices and muted
+                    patterns are <strong>not</strong> affected — new events start accumulating immediately as soon
+                    as the next query lands.
+                </div>
+            </div>
+            <div class="dialog-foot">
+                <button class="btn ghost" @click="confirmClear = false">Cancel</button>
+                <button class="btn danger" @click="clearLog()">Clear logs</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Muted dialog -->
+    <div class="dialog-back" x-show="showMuted" x-cloak @click.self="closeMuted()">
+        <div class="dialog">
+            <div class="dialog-head">
+                <div class="dialog-title">Muted domains</div>
+                <button class="dialog-close" @click="closeMuted()">
+                    <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 3l10 10M13 3L3 13"/></svg>
+                </button>
+            </div>
+            <div class="dialog-body">
+                <div class="field-help" style="margin-bottom:16px;">
+                    Events for these domains are dropped before they reach the monitor (firewall
+                    rules are unaffected). Pattern is treated as a <strong>suffix match</strong>:
+                    muting <code>apple.com</code> swallows every <code>*.apple.com</code> sub-host.
+                </div>
+                <div class="row stretch" style="margin-bottom:16px;">
+                    <input class="input" placeholder="domain or suffix (e.g. apple.com)" x-model="muteForm" @keydown.enter="addMutedFromForm()">
+                    <button class="btn primary" :disabled="!muteForm.trim()" @click="addMutedFromForm()">Mute</button>
+                </div>
+                <table class="tbl">
+                    <thead><tr><th>Pattern</th><th style="width:60px;" class="right"></th></tr></thead>
+                    <tbody>
+                        <template x-for="m in muted" :key="m.id">
+                            <tr>
+                                <td>
+                                    <span style="color:var(--fg);" x-text="m.pattern"></span>
+                                    <span style="color:var(--fg-mute); font-size:11px; margin-left:6px;">· <span x-text="m.match_type"></span></span>
+                                </td>
+                                <td class="actions">
+                                    <button class="btn-icon danger" @click="removeMuted(m.id)" title="Unmute">
+                                        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 3l10 10M13 3L3 13"/></svg>
+                                    </button>
+                                </td>
+                            </tr>
+                        </template>
+                        <template x-if="muted.length === 0">
+                            <tr><td colspan="2" style="text-align:center; color:var(--fg-mute); padding:22px;">Nothing muted yet.</td></tr>
+                        </template>
+                    </tbody>
+                </table>
+            </div>
+        </div>
     </div>
 </div>
 {{end}}
@@ -159,33 +250,64 @@ function trafficApp() {
         loading: false,
         live: true,
         refreshTimer: null,
-        filter: {
-            action: '',
-            q: '',
-            from: '',
-            to: '',
-            source: '',
-        },
+        // `kind` is the chip-row selection: '' / 'dns' / 'tls' / 'tcp' / 'udp'.
+        // It maps to the API's `source` (for DNS) and `protocol` (for TLS/TCP/UDP)
+        // params at load-time — a single chip click filters along the right axis.
+        filter: { action: '', q: '', from: '', to: '', kind: '' },
 
-        setSource(s) {
-            this.filter.source = s;
-            this.page = 1;
-            this.load();
-        },
+        // Per-row context — filter membership for each known domain.
+        filters: [],
+        liveDomains: new Set(),
+        stagedDomains: new Set(),
+
+        // Per-row client lookup — map src_ip → display label (alias /
+        // hostname / "Unknown"). Loaded once on first refresh; refreshed
+        // alongside the filter context.
+        clientByIP: {},
+
+        // Allow dialog
+        allowFor: null,
+        allowFilterId: '',
+        allowWhy: '',
+        newFilterForm: { name: '', description: '' },
+
+        // Muted dialog
+        showMuted: false,
+        muted: [],
+        muteForm: '',
+
+        // Clear-logs confirm
+        confirmClear: false,
+
+        protectedDeny: new Set([
+            // Mirror of services/protected.go — kept here for client-side hint UX only;
+            // server still re-checks at every add path. Acceptable drift; not safety-critical.
+            'hermes-prd.ap.tesla.services','hermes-api.prd.eu.vn.cloud.tesla.com',
+            'ota.vn.tesla.services','firmware.vn.tesla.services','telemetry.vn.tesla.services',
+            'obs.tesla.com','tesla-cdn.com','tesla-cdn.net','teslamotors.com',
+            'tslans.net','mothership.vn.tesla.services',
+        ]),
 
         async load() {
             this.loading = true;
             try {
-                const params = new URLSearchParams({
-                    page: this.page,
-                    per_page: this.perPage,
-                });
+                // Resolve client labels FIRST so the table never paints with
+                // bare IPs while the device map is still empty. A small extra
+                // round-trip cost on first load is preferable to flashing IPs
+                // and then names a moment later.
+                if (Object.keys(this.clientByIP).length === 0) {
+                    await this.loadClients();
+                }
+                const params = new URLSearchParams({ page: this.page, per_page: this.perPage });
                 if (this.filter.action) params.set('action', this.filter.action);
                 if (this.filter.q)      params.set('q',      this.filter.q);
                 if (this.filter.from)   params.set('from',   this.filter.from.replace('T', ' '));
                 if (this.filter.to)     params.set('to',     this.filter.to.replace('T', ' '));
-                if (this.filter.source) params.set('source', this.filter.source);
-
+                // Map the chip selection onto the API axes. DNS events have
+                // source=dns; everything else is forward-chain and is best
+                // distinguished by protocol (TLS / TCP / UDP).
+                if (this.filter.kind === 'dns') params.set('source', 'dns');
+                else if (this.filter.kind)      params.set('protocol', this.filter.kind);
                 const res = await api.get('/api/system/traffic?' + params.toString());
                 this.entries = res.entries || [];
                 this.total   = res.total || 0;
@@ -194,76 +316,256 @@ function trafficApp() {
             } finally {
                 this.loading = false;
             }
+            this.loadMuted();
+            this.loadFilterContext();
+            // Refresh the client map in the background so renames/new leases
+            // pick up on the next render without blocking this one.
+            this.loadClients();
+            if (this.live && !this.refreshTimer) this.startRefresh();
         },
 
-        togglePause() {
-            this.live = !this.live;
-            if (this.live) {
-                this.startRefresh();
-                this.load();
-            } else {
-                this.stopRefresh();
+        async loadClients() {
+            try {
+                const devices = (await api.get('/api/devices')) || [];
+                // Two-pass build so a phantom record (ARP scan ghost with
+                // 00:00:00:00:00:00 MAC and empty hostname) can't clobber the
+                // legitimate device's name for the same IP. Older binaries
+                // wrote those ghosts into the devices table; migration v17
+                // cleans them up server-side, but this client-side filter
+                // protects against any that slip through future regressions.
+                const map = {};
+                for (const d of devices) {
+                    const ip  = (d.ip_address  || '').trim();
+                    const mac = (d.mac_address || '').toUpperCase();
+                    if (!ip || mac === '00:00:00:00:00:00') continue;
+                    const name = (d.alias || '').trim() || (d.hostname || '').trim();
+                    // Always create the IP entry so we know the device exists.
+                    // Only overwrite an existing named entry with another named
+                    // entry — never with an empty one. Empty stays empty until
+                    // a named record comes along.
+                    if (name) map[ip] = name;
+                    else if (!(ip in map)) map[ip] = '';
+                }
+                this.clientByIP = map;
+            } catch (e) { /* api wrapper already toasted */ }
+        },
+
+        // nftables kernel-log MAC is `<dst>:<src>:<ethertype>` — 14 octets
+        // concatenated by colons. Slice out the actual source MAC (octets
+        // 7-12 in 1-indexed) so we can show something readable.
+        extractSrcMac(s) {
+            if (!s) return '';
+            const parts = s.split(':');
+            if (parts.length === 14) return parts.slice(6, 12).join(':').toUpperCase();
+            if (parts.length === 6)  return s.toUpperCase();
+            return '';
+        },
+
+        clientLabel(e) {
+            // Best label: alias → hostname (both via /api/devices map keyed
+            // by IP). Else show the parsed source MAC. Else the IP itself.
+            const known = this.clientByIP[e.src_ip];
+            if (known) return known;
+            const mac = this.extractSrcMac(e.src_mac);
+            if (mac) return mac;
+            return e.src_ip || '—';
+        },
+        clientSub(e) {
+            // If the primary is a name, the IP is supplementary. If the
+            // primary is already an identifier (MAC / IP), skip the sub line.
+            const known = this.clientByIP[e.src_ip];
+            if (known) return e.src_ip || '';
+            const mac = this.extractSrcMac(e.src_mac);
+            if (mac) return e.src_ip || '';
+            return '';
+        },
+
+        // ── Action display (DNS-aware) ─────────────────────────
+        // DNS events come out of dnsmasq with action="query" — that's an
+        // event type, not a verdict. The actual verdict at the DNS layer is
+        // "resolved" (the domain has a server= line) or "sinkholed"
+        // (caught by address=/#/0.0.0.0 default-deny). Compute it from the
+        // same filter context we already have.
+        actionDisplay(e) {
+            if (e.source === 'dns' || e.action === 'query') {
+                const dom = (e.domain || '').toLowerCase();
+                if (!dom) return 'lookup';
+                if (this.isProtected(dom)) return 'sinkholed';
+                if (this._matchSet(this.liveDomains, dom)) return 'resolved';
+                return 'sinkholed';
             }
+            return e.action;
+        },
+        actionClass(e) {
+            const a = this.actionDisplay(e);
+            if (a === 'allowed' || a === 'resolved')  return 'allowed';
+            if (a === 'blocked' || a === 'sinkholed') return 'blocked';
+            return '';
+        },
+        actionTooltip(e) {
+            if (e.source !== 'dns' && e.action !== 'query') return '';
+            const a = this.actionDisplay(e);
+            if (a === 'resolved')  return 'DNS resolved via an enabled filter — the upstream returned a real IP';
+            if (a === 'sinkholed') return 'DNS sinkholed by the default-deny floor — client receives 0.0.0.0';
+            return '';
+        },
+        _matchSet(set, dom) {
+            if (set.has(dom)) return true;
+            for (const s of set) { if (dom.endsWith('.' + s)) return true; }
+            return false;
         },
 
         startRefresh() {
-            if (this.refreshTimer) return;
             this.refreshTimer = setInterval(() => {
-                // Only auto-refresh when on page 1 with no date filters (live mode)
                 if (this.live && this.page === 1 && !this.filter.from && !this.filter.to) {
                     this.load();
                 }
             }, 3000);
         },
-
         stopRefresh() {
-            if (this.refreshTimer) {
-                clearInterval(this.refreshTimer);
-                this.refreshTimer = null;
+            if (this.refreshTimer) { clearInterval(this.refreshTimer); this.refreshTimer = null; }
+        },
+        togglePause() {
+            this.live = !this.live;
+            if (this.live) { this.startRefresh(); this.load(); } else { this.stopRefresh(); }
+        },
+        setKind(k) { this.filter.kind = k; this.page = 1; this.load(); },
+
+        async loadFilterContext() {
+            try {
+                this.filters = (await api.get('/api/filters')) || [];
+                const live = new Set(), staged = new Set();
+                for (const f of this.filters) {
+                    const domains = (await api.get('/api/filters/' + f.id + '/domains')) || [];
+                    for (const d of domains) {
+                        const dom = (d.domain || '').toLowerCase();
+                        if (!dom) continue;
+                        if (f.enabled && d.enabled) live.add(dom);
+                        else staged.add(dom);
+                    }
+                }
+                this.liveDomains = live;
+                this.stagedDomains = staged;
+                if (!this.allowFilterId && this.filters.length) this.allowFilterId = this.filters[0].id;
+            } catch (e) {}
+        },
+
+        isProtected(dom) {
+            if (!dom) return false;
+            const d = dom.toLowerCase();
+            for (const p of this.protectedDeny) {
+                if (d === p || d.endsWith('.' + p)) return true;
             }
+            return false;
+        },
+
+        allowState(e) {
+            const dom = (e.domain || '').toLowerCase();
+            if (!dom) return 'none';
+            if (this.isProtected(dom)) return 'protected';
+            const match = (set) => {
+                if (set.has(dom)) return true;
+                for (const s of set) { if (dom.endsWith('.' + s)) return true; }
+                return false;
+            };
+            if (match(this.liveDomains))   return 'allowed';
+            if (match(this.stagedDomains)) return 'pending';
+            return 'addable';
+        },
+
+        // ── Allow dialog ───────────────────────────────────────
+        openAllow(domain) {
+            this.allowFor = domain;
+            this.allowWhy = '';
+            this.newFilterForm = { name: '', description: '' };
+            if (this.filters.length && !this.allowFilterId) this.allowFilterId = this.filters[0].id;
+        },
+        closeAllow() { this.allowFor = null; },
+        async submitAllow() {
+            if (this.isProtected(this.allowFor)) {
+                notify('"' + this.allowFor + '" is on the protected-deny floor — cannot be allow-listed', 'error');
+                return;
+            }
+            const why = (this.allowWhy || '').trim();
+            if (!why) { notify('Description required — justify the allow-list entry', 'error'); return; }
+
+            let targetId = this.allowFilterId;
+            if (targetId === 'new') {
+                const name = (this.newFilterForm.name || '').trim();
+                const desc = (this.newFilterForm.description || '').trim();
+                if (!name || !desc) { notify('New filter requires name + description', 'error'); return; }
+                try {
+                    const r = await api.post('/api/filters', { name, description: desc });
+                    targetId = r.id;
+                } catch(e) { return; }
+            }
+            try {
+                await api.post('/api/filters/' + targetId + '/domains', {
+                    domain: this.allowFor,
+                    description: why,
+                });
+                notify('Added ' + this.allowFor + ' (disabled — review and toggle on under /filters)', 'success');
+                this.closeAllow();
+                await this.loadFilterContext();
+                this.load();
+            } catch(e) {}
+        },
+
+        // ── Mute ───────────────────────────────────────────────
+        async muteDomain(domain) {
+            try {
+                await api.post('/api/system/traffic/muted', { domain });
+                notify('Muted ' + domain + ' — new events will be dropped', 'success');
+                await this.loadMuted();
+                this.load();
+            } catch(e) {}
+        },
+        async loadMuted() {
+            try { this.muted = (await api.get('/api/system/traffic/muted')) || []; } catch(e) {}
+        },
+        openMuted() { this.loadMuted(); this.showMuted = true; },
+        closeMuted() { this.showMuted = false; },
+        async addMutedFromForm() {
+            const d = (this.muteForm || '').trim();
+            if (!d) return;
+            try {
+                await api.post('/api/system/traffic/muted', { domain: d });
+                notify('Muted ' + d + ' (and every *.' + d + ')', 'success');
+                this.muteForm = '';
+                await this.loadMuted();
+                this.load();
+            } catch(e) {}
+        },
+        async removeMuted(id) {
+            try {
+                await api.delete('/api/system/traffic/muted/' + id);
+                await this.loadMuted();
+                notify('Unmuted — events will be logged again', 'success');
+            } catch(e) {}
         },
 
         async clearLog() {
-            if (!confirm('Clear ALL traffic log entries? This cannot be undone.')) return;
-            await api.post('/api/system/traffic/clear');
-            notify('Traffic log cleared', 'success');
-            this.page = 1;
-            this.load();
-        },
-
-        async quickAllow(domain) {
+            const had = this.total;
             try {
-                await api.post('/api/firewall/allowed-domains', {
-                    domain: domain,
-                    description: 'Added from traffic monitor',
-                    enabled: true
-                });
-                notify(domain + ' allowed — new queries will pass. Older log rows stay marked blocked.', 'success');
+                await api.post('/api/system/traffic/clear');
+                this.confirmClear = false;
+                this.page = 1;
+                notify('Cleared ' + had.toLocaleString() + ' event' + (had === 1 ? '' : 's') + ' from the log', 'success');
                 this.load();
-            } catch(e) { /* api.request already showed the error toast */ }
+            } catch(e) {}
         },
 
         fmtTime(ts) {
-            if (!ts) return '-';
-            // Try to parse various formats
-            const d = new Date(ts);
-            if (isNaN(d)) return ts;
-            return d.toLocaleString(undefined, {
-                month: 'short', day: '2-digit',
-                hour: '2-digit', minute: '2-digit', second: '2-digit'
-            });
+            if (!ts) return '—';
+            // try parse
+            const dt = new Date(ts.includes('T') ? ts : ts.replace(' ', 'T') + 'Z');
+            if (isNaN(dt.getTime())) return ts;
+            const h = String(dt.getHours()).padStart(2, '0');
+            const m = String(dt.getMinutes()).padStart(2, '0');
+            const s = String(dt.getSeconds()).padStart(2, '0');
+            return `${h}:${m}:${s}`;
         },
-
-        init() {
-            this.startRefresh();
-        }
     };
 }
-
-// Auto-start refresh after Alpine initializes
-document.addEventListener('alpine:initialized', () => {
-    const app = document.querySelector('[x-data]')?.__x?.$data;
-    if (app && app.startRefresh) app.startRefresh();
-});
 </script>
 {{end}}

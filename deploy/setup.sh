@@ -75,9 +75,17 @@ if [[ ${#AP_PASS} -lt 8 ]]; then
     error "WPA2 password must be at least 8 characters"
 fi
 
-read -rp "WiFi country code (ISO 3166-1, e.g. US, GB, DE) [US]: " COUNTRY_CODE
-COUNTRY_CODE=${COUNTRY_CODE:-US}
+read -rp "WiFi country code (ISO 3166-1, e.g. US, GB, DE) [GB]: " COUNTRY_CODE
+COUNTRY_CODE=${COUNTRY_CODE:-GB}
 COUNTRY_CODE="${COUNTRY_CODE^^}"
+
+# 5 GHz channel — UNII-1 (36-48) is allowed in nearly every region
+# without DFS. We default to 36 because Pi 4's WiFi and BLE share one
+# radio, and 5 GHz hostapd is the only way BLE scans (for V4's Tesla
+# integration) succeed reliably. 2.4 GHz works for non-BLE installs;
+# pick channel 6 if you have 2.4-GHz-only clients that matter.
+read -rp "Hotspot channel — 36 (5 GHz, recommended for V4/Tesla) or 6 (2.4 GHz, legacy) [36]: " AP_CHANNEL
+AP_CHANNEL=${AP_CHANNEL:-36}
 
 read -rsp "Admin web UI password: " ADMIN_PASS; echo
 [[ -z "$ADMIN_PASS" ]] && error "Admin password is required"
@@ -88,7 +96,19 @@ info "Installing packages..."
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y hostapd dnsmasq nftables iw wireless-tools iproute2 \
-    rfkill network-manager openssl ca-certificates
+    rfkill network-manager openssl ca-certificates \
+    bluez bluetooth python3 sqlite3 curl conntrack
+
+# Tailscale (V4 Tier D — /remote-access uses it to give the Pi a stable
+# .ts.net hostname reachable through CGNAT). Skip if the apt source is
+# already present from a prior run.
+if ! command -v tailscale >/dev/null 2>&1; then
+    info "Installing Tailscale (used by /remote-access)..."
+    curl -fsSL https://tailscale.com/install.sh | sh
+fi
+# Authentication is deferred — operator pastes an auth key on the web
+# UI's /remote-access page. The daemon comes up "logged out"; that's
+# fine.
 
 # --- Stop/unmask services before reconfiguring -------------------------------
 
@@ -115,11 +135,16 @@ info "Freeing port 53 from systemd-resolved..."
 if systemctl list-unit-files systemd-resolved.service &>/dev/null; then
     systemctl disable --now systemd-resolved 2>/dev/null || true
 fi
-# Replace the symlinked resolv.conf with a static one pointing at our dnsmasq.
+# Replace the symlinked resolv.conf with a static one pointing AT the
+# public resolvers directly — NOT through dnsmasq. The Pi's own processes
+# (apt, curl, etc.) need a working resolver, but dnsmasq runs default-
+# deny for LAN clients and would NXDOMAIN every Pi query if 127.0.0.1
+# were first in the list. LAN clients still query dnsmasq via DHCP-pushed
+# DNS = the Pi's wlan0 IP; this resolv.conf is only consulted by the Pi
+# itself.
 if [[ -L /etc/resolv.conf ]] || [[ ! -s /etc/resolv.conf ]]; then
     rm -f /etc/resolv.conf
     cat > /etc/resolv.conf << 'RESOLV'
-nameserver 127.0.0.1
 nameserver 1.1.1.1
 nameserver 8.8.8.8
 RESOLV
@@ -147,17 +172,33 @@ sysctl -p /etc/sysctl.d/99-netfilter.conf >/dev/null
 info "Installing service configs..."
 
 # hostapd — written via heredoc so special characters in the password
-# (/, |, &, \) don't break sed escaping. Base conf is kept for netfilterd
-# to reference when the user edits hotspot settings via the web UI.
+# (/, |, &, \) don't break sed escaping. netfilterd's HotspotService
+# overwrites this on every boot from the `settings` table (which we
+# seed below) — but we write a coherent bootstrap config too so the
+# first hostapd start before netfilterd takes over isn't a misconfig.
+#
+# Band: 1-14 → 2.4 GHz (hw_mode=g); 36+ → 5 GHz (hw_mode=a). 5 GHz
+# adds ieee80211ac (VHT) + ieee80211h (DFS/TPC for higher channels;
+# harmless on UNII-1). Both bands enable 11n.
+if [[ "$AP_CHANNEL" -ge 36 ]]; then
+    AP_HWMODE="a"
+    AP_5GHZ_LINES="ieee80211ac=1
+ieee80211h=1"
+else
+    AP_HWMODE="g"
+    AP_5GHZ_LINES=""
+fi
 mkdir -p /etc/hostapd
 cat > /etc/hostapd/hostapd.conf << HOSTAPD
 country_code=${COUNTRY_CODE}
 interface=wlan0
 driver=nl80211
 ssid=${AP_SSID}
-hw_mode=g
-channel=6
+hw_mode=${AP_HWMODE}
+channel=${AP_CHANNEL}
+ieee80211d=1
 ieee80211n=1
+${AP_5GHZ_LINES}
 wmm_enabled=1
 macaddr_acl=0
 auth_algs=1
@@ -232,7 +273,7 @@ fi
 # --- App config --------------------------------------------------------------
 
 cat > /etc/netfilterd/config.yaml << YAML
-listen_addr: "192.168.4.1:8443"
+listen_addr: ":8443"
 use_tls: true
 tls_cert: "/etc/netfilterd/server.crt"
 tls_key: "/etc/netfilterd/server.key"
@@ -260,11 +301,48 @@ info "Creating admin user..."
 /usr/local/bin/netfilterd --config /etc/netfilterd/config.yaml \
     --init-admin --username admin --password "$ADMIN_PASS"
 
-# --- WiFi unblock ------------------------------------------------------------
+# --- Seed netfilterd settings table -----------------------------------------
+#
+# netfilterd's HotspotService writes hostapd.conf from the `settings` table
+# on every Apply(). If the rows aren't there, it falls back to hardcoded
+# defaults — overwriting the SSID/password/channel/country the operator
+# just chose. Seed them now so the first Apply is a no-op.
+info "Seeding hotspot settings into netfilterd DB..."
+python3 <<PYSEED
+import sqlite3
+c = sqlite3.connect("/var/lib/netfilterd/netfilter.db")
+for k, v in [
+    ("ap_ssid",     "${AP_SSID}"),
+    ("ap_password", "${AP_PASS}"),
+    ("ap_channel",  "${AP_CHANNEL}"),
+    ("ap_country",  "${COUNTRY_CODE}"),
+]:
+    c.execute(
+        "INSERT INTO settings (key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (k, v),
+    )
+c.commit()
+PYSEED
 
-info "Unblocking WiFi radio..."
+# --- WiFi + Bluetooth unblock ------------------------------------------------
+#
+# Pi 4's BCM43455 radio hosts both WiFi and BLE. We need both unblocked
+# for V4's Tesla integration. rfkill can soft-block bluetooth at boot
+# on some images (we've hit this); unblock both unconditionally.
+info "Unblocking WiFi + Bluetooth radios..."
 rfkill unblock wifi || true
+rfkill unblock bluetooth || true
 iw reg set "$COUNTRY_CODE" || true
+
+# --- Bluetooth daemon --------------------------------------------------------
+#
+# netfilterd's Tesla BLE service uses go-ble's raw HCI socket, NOT BlueZ
+# — so bluetoothd isn't strictly required for daemon operation. We start
+# it anyway because (a) the spike CLI uses bluetoothctl for diagnostics
+# and (b) operators expect "Bluetooth works" on a fresh Pi.
+info "Enabling Bluetooth daemon..."
+systemctl enable --now bluetooth >/dev/null 2>&1 || true
 
 # --- Enable services (without starting yet) ----------------------------------
 
@@ -301,13 +379,19 @@ echo "  Ready to bring up the hotspot"
 echo "================================================"
 echo ""
 echo "  Hotspot SSID:  ${AP_SSID}"
-echo "  Country code:  ${COUNTRY_CODE}"
+echo "  Band:          ${AP_HWMODE} (channel ${AP_CHANNEL}, country ${COUNTRY_CODE})"
 echo "  Web UI:        https://192.168.4.1:8443"
 echo "  Admin user:    admin"
 echo ""
 echo "  WAN interface: ${WAN_IFACE}"
 echo "  LAN interface: wlan0 → 192.168.4.1/24 (hotspot)"
 echo ""
+if [[ "$AP_CHANNEL" -ge 36 ]]; then
+echo "  5 GHz: chosen so BLE has the 2.4 GHz radio to itself —"
+echo "         required for /garage (Tesla BLE control). All modern"
+echo "         clients (Tesla, iPhone, Mac, etc.) handle 5 GHz."
+echo ""
+fi
 echo "  Heads-up: the final step will take wlan0 into AP mode."
 echo "  If you're SSHed in over wlan0, your session will drop."
 echo "  The bring-up runs detached and continues on its own."
@@ -315,6 +399,10 @@ echo ""
 echo "  Bring-up log:  ${BRINGUP_LOG}"
 echo "  After it settles, connect a device to the '${AP_SSID}' SSID"
 echo "  and open https://192.168.4.1:8443"
+echo ""
+echo "  V4 next steps:"
+echo "    - /garage:        pair your Tesla over BLE (need the car nearby)"
+echo "    - /remote-access: paste a Tailscale auth key for off-LAN access"
 echo ""
 echo "================================================"
 

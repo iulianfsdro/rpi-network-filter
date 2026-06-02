@@ -1,0 +1,919 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>airgap — Tesla client</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="airgap.css">
+    <style>
+        /* The client is a single-page app with no rail or headbar — it's
+           a standalone view, not embedded in netfilterd's admin shell. */
+        body { overflow: auto; }
+        .client-shell {
+            max-width: 900px; margin: 0 auto;
+            padding: 36px 28px 80px;
+            min-height: 100vh;
+        }
+        @media (max-width: 600px) {
+            .client-shell { padding: 20px 16px 60px; }
+        }
+        .client-bar {
+            display: flex; align-items: center; gap: 12px;
+            margin-bottom: 28px;
+        }
+        .client-bar-mark {
+            font-size: 20px; font-weight: 600; letter-spacing: -0.02em;
+            display: flex; align-items: center; gap: 10px;
+        }
+        .client-bar-glyph { width: 20px; height: 20px; position: relative; }
+        .client-bar-glyph::before {
+            content: ""; position: absolute; inset: 0; border-radius: 3px;
+            background: var(--fg); clip-path: polygon(50% 0,100% 50%,50% 100%,0 50%);
+        }
+        .client-bar-glyph::after {
+            content: ""; position: absolute; inset: 6px; border-radius: 2px;
+            background: var(--bg); clip-path: polygon(50% 0,100% 50%,50% 100%,0 50%);
+        }
+        .client-bar-spacer { flex: 1; }
+        .client-bar-status {
+            display: inline-flex; align-items: center; gap: 7px;
+            font-size: 12px; color: var(--fg-dim);
+        }
+        .client-bar-status-dot {
+            width: 7px; height: 7px; border-radius: 50%;
+            background: var(--ok); box-shadow: 0 0 0 3px var(--ok-faint);
+        }
+        .client-bar-status-dot.warn { background: var(--warn); box-shadow: 0 0 0 3px var(--warn-faint); }
+        .client-bar-status-dot.danger { background: var(--danger); box-shadow: 0 0 0 3px var(--danger-faint); }
+        .client-bar .btn-icon { color: var(--fg-mute); }
+
+        .enrol-card { max-width: 520px; margin: 8vh auto 0; }
+        .enrol-card .card-body { padding: 26px 28px 26px; }
+        .enrol-help { color: var(--fg-mute); font-size: 12.5px; margin-top: 6px; line-height: 1.55; }
+        .enrol-help a { color: var(--fg-dim); }
+
+        .stat-tile {
+            background: var(--bg-elev); border-radius: var(--radius);
+            padding: 22px 24px; display: flex; flex-direction: column; gap: 8px;
+            position: relative;
+        }
+        /* Tiny refresh icon in each stat tile's top-right corner.
+           Tesla-style lazy load: each card refreshes itself instead
+           of forcing the user through the global Refresh button. */
+        .stat-tile-refresh {
+            position: absolute; top: 12px; right: 12px;
+            background: transparent; border: 0; cursor: pointer;
+            color: var(--fg-mute); opacity: 0.5;
+            padding: 4px; border-radius: 4px;
+            transition: opacity 0.15s, background 0.15s;
+            display: flex; align-items: center; justify-content: center;
+        }
+        .stat-tile-refresh:hover { opacity: 1; background: var(--bg-elev-2); }
+        .stat-tile-refresh:disabled { opacity: 0.2; cursor: default; }
+        .stat-tile-refresh svg { width: 13px; height: 13px; }
+        .stat-tile-label { font-size: 12px; color: var(--fg-mute); }
+        .stat-tile-value { font-size: 30px; font-weight: 500; letter-spacing: -0.02em; color: var(--fg); line-height: 1; }
+        .stat-tile-value .unit { font-size: 13px; color: var(--fg-mute); font-weight: 400; margin-left: 6px; }
+
+        .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 14px; }
+        .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-bottom: 14px; }
+        @media (max-width: 720px) { .grid-2, .grid-3 { grid-template-columns: 1fr; } }
+
+        .row-wrap { display: flex; gap: 8px; flex-wrap: wrap; }
+        .meta { color: var(--fg-mute); font-size: 11.5px; }
+
+        /* "as of X ago" — appears under card heads + on stat tiles. */
+        .as-of {
+            font-size: 11px; color: var(--fg-mute);
+            font-feature-settings: "tnum";
+            display: inline-flex; align-items: center; gap: 5px;
+        }
+        .as-of .dot {
+            width: 5px; height: 5px; border-radius: 50%;
+            background: var(--fg-mute);
+        }
+        .as-of.stale .dot { background: var(--warn); }
+
+        /* Pulse highlight when a slice gets a fresh sync. Triggered by
+           the isUpdated flag set in state.js, cleared after ~1.5s. */
+        @keyframes pulse-fresh {
+            0%   { background-color: rgba(80,200,120,0.18); }
+            100% { background-color: transparent; }
+        }
+        .slice-fresh { animation: pulse-fresh 1.4s ease-out; }
+
+        /* Pending — Infotainment field has been written optimistically
+           but not yet confirmed by an awake sync. Small dotted ring. */
+        .pending-mark {
+            font-size: 10px; padding: 1px 6px; border-radius: 10px;
+            border: 1px dashed var(--fg-mute); color: var(--fg-mute);
+            margin-left: 6px; vertical-align: middle;
+            font-feature-settings: "tnum"; letter-spacing: 0.02em;
+        }
+
+        /* Awake/asleep badge on the top bar. */
+        .sleep-badge {
+            font-size: 10.5px; padding: 2px 8px; border-radius: 10px;
+            border: 1px solid var(--line); color: var(--fg-mute);
+            letter-spacing: 0.02em;
+        }
+        .sleep-badge.awake  { color: var(--ok);    border-color: var(--ok); }
+        .sleep-badge.asleep { color: var(--fg-mute); }
+
+        [x-cloak] { display: none !important; }
+    </style>
+</head>
+<body>
+    <div class="client-shell" x-data="clientApp()" x-init="init()" x-cloak>
+
+        <!-- ── Enrolment screen ─────────────────────────────────── -->
+        <template x-if="screen === 'enrol'">
+            <div>
+                <div class="client-bar">
+                    <div class="client-bar-mark">
+                        <span class="client-bar-glyph"></span>
+                        <span>airgap</span>
+                    </div>
+                    <div class="client-bar-spacer"></div>
+                    <span style="font-size:12px; color:var(--fg-mute);">client v0</span>
+                </div>
+
+                <div class="card enrol-card">
+                    <div class="card-head">
+                        <div>
+                            <div class="card-head-title">Connect to your Pi</div>
+                            <div class="card-head-sub">Paste the API URL and bearer token from the Pi's <code>/settings</code>.</div>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <div class="field">
+                            <label class="label">API URL</label>
+                            <input class="input mono" x-model="cfg.api" @input="_autoParseEnrolUrl()"
+                                   placeholder="https://pi.tail-XXXX.ts.net/api/ble">
+                            <div class="enrol-help">
+                                Paste either the API URL directly, OR an
+                                <code>airgap://enrol?api=…&amp;token=…&amp;nickname=…</code> URL
+                                from the Pi's <strong>Settings → BLE client tokens → Issue
+                                token</strong> screen — the URL form auto-fills all three
+                                fields below.
+                            </div>
+                        </div>
+                        <div class="field">
+                            <label class="label">Bearer token</label>
+                            <input type="password" class="input mono" x-model="cfg.token"
+                                   placeholder="…43 random base64url chars…">
+                            <div class="enrol-help">
+                                Issued at the Pi's <strong>Settings → BLE client tokens → Issue token</strong>.
+                                Stored in this device's <code>localStorage</code>, never sent anywhere
+                                except in the <code>Authorization: Bearer …</code> header to the URL above.
+                            </div>
+                        </div>
+                        <div class="field">
+                            <label class="label">Nickname (optional)</label>
+                            <input class="input" x-model="cfg.nickname"
+                                   placeholder="e.g. Red Ferrari, Charlie's Tesla">
+                            <div class="enrol-help">
+                                Display only — shows up in the corner of the Garage
+                                screen so you can tell which car this client speaks to.
+                                The crypto VIN is configured separately, fetched from
+                                the Pi after you connect.
+                            </div>
+                        </div>
+                        <div class="form-row" style="gap:8px; margin-top:10px;">
+                            <button class="btn primary"
+                                    @click="connect()"
+                                    :disabled="busy || !cfg.api || !cfg.token"
+                                    x-text="busy ? 'Checking…' : 'Connect'"></button>
+                        </div>
+                        <div x-show="enrolError" class="protected-banner" style="margin-top:14px;"
+                             x-text="enrolError"></div>
+                    </div>
+                </div>
+            </div>
+        </template>
+
+        <!-- ── Garage screen ────────────────────────────────────── -->
+        <template x-if="screen === 'garage'">
+            <div>
+                <div class="client-bar">
+                    <div class="client-bar-mark">
+                        <span class="client-bar-glyph"></span>
+                        <span>airgap</span>
+                        <span style="color:var(--fg-faint);">/</span>
+                        <em style="font-style:normal; color:var(--fg);"
+                            x-text="cfg.nickname || 'Garage'"></em>
+                    </div>
+                    <div class="client-bar-spacer"></div>
+                    <span class="client-bar-status">
+                        <span class="client-bar-status-dot"
+                              :class="vin ? '' : 'warn'"></span>
+                        <span x-text="vin ? ('BLE · ' + vin.slice(-6)) : 'no VIN'"></span>
+                    </span>
+                    <!-- Sleep flag from VCSEC. AWAKE means infotainment
+                         is currently powered; piggyback syncs will
+                         happen "for free" until the console sleeps. -->
+                    <span class="sleep-badge"
+                          x-show="vs?.vcsec?.sleepStatus"
+                          :class="isAwake ? 'awake' : 'asleep'"
+                          x-text="isAwake ? 'AWAKE' : (isAsleep ? 'ASLEEP' : (vs?.vcsec?.sleepStatus || ''))"
+                          :title="'console state · as of ' + humanAgo(vs?.vcsec?.lastUpdatedAt) + ' (_agoTick=' + _agoTick + ')'"></span>
+                    <button class="btn-icon" @click="directRefreshState()" title="Refresh — wakes the car like the Tesla app"
+                            :disabled="directBusy">
+                        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14 8a6 6 0 1 0-2 4.5"/><path d="M14 3v4h-4"/></svg>
+                    </button>
+                    <!-- Reset BLE: drops cached sessions + clears the
+                         per-VIN queue. Surfaces a "build marker" tag
+                         next to it so you can SEE in the UI whether
+                         the deployed JS matches what's on disk. If
+                         this tag isn't visible, the page is stale —
+                         hard-reload. -->
+                    <button class="btn-icon" @click="resetBle()" title="Force BLE reset — drops cached sessions and clears the queue">
+                        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6"/><path d="M8 4v4l3 2"/></svg>
+                    </button>
+                    <span style="font-size:10px; color:var(--fg-mute); font-family:monospace;" title="If you don't see this tag the page is stale — hard reload">build:s36</span>
+                    <button class="btn-icon" @click="forget()" title="Forget this Pi">
+                        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="2.2"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3 3l1.5 1.5M11.5 11.5L13 13M3 13l1.5-1.5M11.5 4.5L13 3"/></svg>
+                    </button>
+                </div>
+
+                <!-- VIN setup card — shown only when the Pi has no VIN yet. -->
+                <template x-if="!vin">
+                    <div class="card" style="border:1px solid var(--warn); margin-bottom:14px;">
+                        <div class="card-head">
+                            <div>
+                                <div class="card-head-title" style="color:var(--warn);">VIN not configured</div>
+                                <div class="card-head-sub">The Pi needs your real 17-char Tesla VIN before any BLE session can open. It's used both to find the car's advertisement and as the AES-GCM personalization field.</div>
+                            </div>
+                        </div>
+                        <div class="card-body">
+                            <div class="form-row" style="gap:10px; align-items:center;">
+                                <input type="text" class="input mono" maxlength="17" minlength="17"
+                                       x-model="vinInput" placeholder="5YJ3E1EA1AAAA0001"
+                                       style="text-transform:uppercase; max-width:260px;">
+                                <button class="btn primary"
+                                        :disabled="vinInput.length !== 17 || savingVin"
+                                        @click="saveVin()"
+                                        x-text="savingVin ? 'Saving…' : 'Save VIN'"></button>
+                            </div>
+                            <div class="enrol-help" style="margin-top:8px;">
+                                Find it in the Tesla mobile app → vehicle → details, or on the lower-left of the windscreen.
+                            </div>
+                        </div>
+                    </div>
+                </template>
+
+                <!-- Top-level state. Each tile shows last-known value
+                     plus an "as of X" footer; the pulse class fires
+                     when a fresh sync writes the slice. -->
+                <div class="grid-3">
+                    <div class="stat-tile" :class="vs?.charge?.isUpdated ? 'slice-fresh' : ''">
+                        <button class="stat-tile-refresh" @click="directReadCharge()" :disabled="directBusy"
+                                title="Refresh battery (single round-trip)">
+                            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14 8a6 6 0 1 0-2 4.5"/><path d="M14 3v4h-4"/></svg>
+                        </button>
+                        <div class="stat-tile-label">
+                            Battery
+                            <span x-show="vs?.charge?.dirty?.soc || vs?.charge?.dirty?.charge_limit_soc"
+                                  class="pending-mark">pending</span>
+                        </div>
+                        <div class="stat-tile-value">
+                            <span x-text="vs?.charge?.soc ?? '—'"></span><span class="unit">%</span>
+                        </div>
+                        <div class="meta" x-text="'range ' + (vs?.charge?.range_km != null ? vs.charge.range_km + ' km' : '—')"></div>
+                        <div class="as-of" :class="vs?.charge?.lastUpdatedAt && (Date.now() - vs.charge.lastUpdatedAt > 300000) ? 'stale' : ''"
+                             x-show="vs?.charge?.lastUpdatedAt">
+                            <span class="dot"></span>
+                            <span x-text="'as of ' + humanAgo(vs?.charge?.lastUpdatedAt) + (_agoTick, '')"></span>
+                        </div>
+                    </div>
+                    <div class="stat-tile" :class="vs?.climate?.isUpdated ? 'slice-fresh' : ''">
+                        <button class="stat-tile-refresh" @click="directReadClimate()" :disabled="directBusy"
+                                title="Refresh climate (single round-trip)">
+                            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14 8a6 6 0 1 0-2 4.5"/><path d="M14 3v4h-4"/></svg>
+                        </button>
+                        <div class="stat-tile-label">
+                            Climate
+                            <span x-show="vs?.climate?.dirty?.is_on || vs?.climate?.dirty?.target_temp_c"
+                                  class="pending-mark">pending</span>
+                        </div>
+                        <div class="stat-tile-value">
+                            <span x-text="vs?.climate?.inside_temp_c != null ? vs.climate.inside_temp_c.toFixed(1) : '—'"></span><span class="unit">°C inside</span>
+                        </div>
+                        <div class="meta" x-text="'outside ' + (vs?.climate?.outside_temp_c != null ? vs.climate.outside_temp_c.toFixed(1) + '°C' : '—')"></div>
+                        <div class="as-of" :class="vs?.climate?.lastUpdatedAt && (Date.now() - vs.climate.lastUpdatedAt > 300000) ? 'stale' : ''"
+                             x-show="vs?.climate?.lastUpdatedAt">
+                            <span class="dot"></span>
+                            <span x-text="'as of ' + humanAgo(vs?.climate?.lastUpdatedAt) + (_agoTick, '')"></span>
+                        </div>
+                    </div>
+                    <div class="stat-tile" :class="vs?.vcsec?.isUpdated ? 'slice-fresh' : ''">
+                        <button class="stat-tile-refresh" @click="verifyClosures()" :disabled="directBusy"
+                                title="Refresh locks + closures (cheap VCSEC GET_STATUS, no wake)">
+                            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14 8a6 6 0 1 0-2 4.5"/><path d="M14 3v4h-4"/></svg>
+                        </button>
+                        <div class="stat-tile-label">Locks &amp; closures</div>
+                        <div class="stat-tile-value" style="font-size:18px; display:flex; gap:14px; align-items:baseline;">
+                            <span :style="locked ? 'color:var(--ok);' : 'color:var(--warn);'"
+                                  x-text="locked ? '🔒 locked' : '🔓 unlocked'"></span>
+                        </div>
+                        <div class="meta" x-text="vin ? ('VIN · ' + vin) : 'VIN not set'"></div>
+                        <div class="as-of" :class="vs?.vcsec?.lastUpdatedAt && (Date.now() - vs.vcsec.lastUpdatedAt > 300000) ? 'stale' : ''"
+                             x-show="vs?.vcsec?.lastUpdatedAt">
+                            <span class="dot"></span>
+                            <span x-text="'as of ' + humanAgo(vs?.vcsec?.lastUpdatedAt) + (_agoTick, '')"></span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Locks + base actions -->
+                <div class="card">
+                    <div class="card-head">
+                        <div>
+                            <div class="card-head-title">Locks &amp; alerts</div>
+                            <div class="card-head-sub">Owner-key signed · arrives in ~1s</div>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <div class="row-wrap">
+                            <button class="btn" @click="directLock()">Lock</button>
+                            <button class="btn" @click="directUnlock()">Unlock</button>
+                            <button class="btn ghost" @click="directHonk()">Honk</button>
+                            <button class="btn ghost" @click="directFlashLights()">Flash lights</button>
+                            <button class="btn ghost" @click="directWake()">Wake</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Climate -->
+                <div class="card">
+                    <div class="card-head">
+                        <div>
+                            <div class="card-head-title">Climate</div>
+                            <div class="card-head-sub">
+                                <span x-text="vs?.climate?.is_on ? 'On' : 'Off'"></span> ·
+                                target <span x-text="vs?.climate?.target_temp_c != null ? vs.climate.target_temp_c.toFixed(1) + '°C' : '—'"></span>
+                                <span class="as-of" x-show="vs?.climate?.lastUpdatedAt" style="margin-left:8px;">
+                                    <span class="dot"></span>
+                                    <span x-text="humanAgo(vs?.climate?.lastUpdatedAt) + (_agoTick, '')"></span>
+                                </span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <div class="row-wrap" style="margin-bottom:14px;">
+                            <button class="btn" @click="directClimateOn()">Climate ON</button>
+                            <button class="btn" @click="directClimateOff()">Climate OFF</button>
+                            <button class="btn ghost" @click="directDefrostOn()">Defrost ON</button>
+                            <button class="btn ghost" @click="directDefrostOff()">Defrost OFF</button>
+                        </div>
+                        <div class="form-row" style="gap:10px; align-items:center; margin-top:10px;">
+                            <input type="number" class="input" min="15" max="28" step="0.5"
+                                   x-model.number="climateTarget" style="max-width:140px;">
+                            <span class="meta">°C target</span>
+                            <button class="btn"
+                                    :disabled="!climateTarget || climateTarget < 15 || climateTarget > 28"
+                                    @click="directSetClimateTemp()">Set</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Closures -->
+                <div class="card">
+                    <div class="card-head">
+                        <div>
+                            <div class="card-head-title">Closures</div>
+                            <div class="card-head-sub">
+                                Front trunk · rear trunk · charge port
+                                <span class="as-of" x-show="vs?.vcsec?.lastUpdatedAt" style="margin-left:8px;">
+                                    <span class="dot"></span>
+                                    <span x-text="humanAgo(vs?.vcsec?.lastUpdatedAt) + (_agoTick, '')"></span>
+                                </span>
+                            </div>
+                        </div>
+                        <div class="card-head-spacer"></div>
+                        <!-- Verify = cheap VCSEC GET_STATUS, no wake.
+                             Tesla's Hall sensors can lag minutes after
+                             manual close; this re-reads them. If still
+                             wrong, Refresh (wakes the car) gets truth
+                             from Infotainment's live signal. -->
+                        <button class="btn sm ghost" @click="verifyClosures()" :disabled="directBusy"
+                                title="Re-read VCSEC (no wake). Use Refresh button on top bar to wake + verify via Infotainment.">
+                            Verify
+                        </button>
+                    </div>
+                    <div class="card-body">
+                        <!-- Current closure state — each cell shows
+                             VCSEC's latest reading. Closure-sensor lag
+                             can leave these stale for minutes; the
+                             as-of timestamp above is the truth. -->
+                        <div class="row-wrap" style="margin-bottom:14px;">
+                            <!-- closureChips is a STABLE array on the
+                                 model — using an inline literal here
+                                 would create a new array on every
+                                 render, defeating Alpine's keyed
+                                 reuse and re-mounting DOM nodes each
+                                 tick. -->
+                            <template x-for="[label, key] in closureChips" :key="key">
+                                <span class="meta" style="display:inline-flex; gap:6px; padding:5px 10px; border:1px solid var(--line); border-radius:6px;">
+                                    <span x-text="label"></span>
+                                    <strong style="color:var(--fg);"
+                                            x-text="(vs?.vcsec?.closures?.[key] || '—').toLowerCase()"></strong>
+                                </span>
+                            </template>
+                        </div>
+                        <div class="row-wrap">
+                            <button class="btn ghost" @click="directOpenFrunk()">Open frunk</button>
+                            <button class="btn ghost" @click="directOpenTrunk()">Open trunk</button>
+                            <button class="btn ghost" @click="directCloseTrunk()">Close trunk</button>
+                            <button class="btn ghost" @click="directOpenChargePort()">Open charge port</button>
+                            <button class="btn ghost" @click="directCloseChargePort()">Close charge port</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Charging -->
+                <div class="card">
+                    <div class="card-head">
+                        <div>
+                            <div class="card-head-title">Charging</div>
+                            <div class="card-head-sub">
+                                <span x-text="vs?.charge?.charging_state ?? 'unknown'"></span> ·
+                                limit <span x-text="vs?.charge?.charge_limit_soc ?? '—'"></span>%
+                                <span class="as-of" x-show="vs?.charge?.lastUpdatedAt" style="margin-left:8px;">
+                                    <span class="dot"></span>
+                                    <span x-text="humanAgo(vs?.charge?.lastUpdatedAt) + (_agoTick, '')"></span>
+                                </span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <div class="row-wrap" style="margin-bottom:14px;">
+                            <button class="btn" @click="directStartCharging()">Start charging</button>
+                            <button class="btn" @click="directStopCharging()">Stop charging</button>
+                            <button class="btn ghost" @click="directChargeStandardRange()">Standard range</button>
+                            <button class="btn ghost" @click="directChargeMaxRange()">Max range</button>
+                        </div>
+                        <div class="form-row" style="gap:10px; align-items:center;">
+                            <input type="number" class="input" min="50" max="100" step="1"
+                                   x-model.number="chargeLimit"
+                                   style="max-width:140px;">
+                            <span class="meta">% limit</span>
+                            <button class="btn"
+                                    :disabled="!chargeLimit || chargeLimit < 50 || chargeLimit > 100"
+                                    @click="directSetChargeLimit()">
+                                Set
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Sentry. The vehicle_state sub-slice that carries
+                     sentry_mode isn't part of our current sync surface
+                     (would need a getVehicleState read added). The
+                     dirty mark surfaces our local intent until then. -->
+                <div class="card">
+                    <div class="card-head">
+                        <div>
+                            <div class="card-head-title">Sentry mode</div>
+                            <div class="card-head-sub">
+                                <span x-text="vs?.sentry?.is_on ? 'Armed' : 'Idle'"></span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <div class="row-wrap">
+                            <button class="btn" @click="directSentryOn()">Sentry ON</button>
+                            <button class="btn" @click="directSentryOff()">Sentry OFF</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Comfort (Thread C-3) -->
+                <div class="card">
+                    <div class="card-head">
+                        <div>
+                            <div class="card-head-title">Comfort</div>
+                            <div class="card-head-sub">Climate keeper · cabin overheat · keep accessory power · steering wheel heater</div>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <div class="row-wrap" style="margin-bottom:10px;">
+                            <button class="btn ghost" @click="directSetClimateKeeper(airgap.CLIMATE_KEEPER.OFF)">Keeper · Off</button>
+                            <button class="btn ghost" @click="directSetClimateKeeper(airgap.CLIMATE_KEEPER.ON)">Keeper · On</button>
+                            <button class="btn ghost" @click="directSetClimateKeeper(airgap.CLIMATE_KEEPER.DOG)">Dog mode</button>
+                            <button class="btn ghost" @click="directSetClimateKeeper(airgap.CLIMATE_KEEPER.CAMP)">Camp mode</button>
+                        </div>
+                        <div class="row-wrap" style="margin-bottom:10px;">
+                            <button class="btn ghost" @click="directSetCabinOverheat(true)">Cabin overheat ON</button>
+                            <button class="btn ghost" @click="directSetCabinOverheat(false)">Cabin overheat OFF</button>
+                            <button class="btn ghost" @click="directKeepAccPowerOn()">Keep acc. power ON</button>
+                            <button class="btn ghost" @click="directKeepAccPowerOff()">Keep acc. power OFF</button>
+                        </div>
+                        <div class="row-wrap">
+                            <button class="btn ghost" @click="directWheelHeaterOn()">Wheel heater ON</button>
+                            <button class="btn ghost" @click="directWheelHeaterOff()">Wheel heater OFF</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Windows -->
+                <div class="card">
+                    <div class="card-head">
+                        <div>
+                            <div class="card-head-title">Windows</div>
+                            <div class="card-head-sub">Vent (~5cm open) or close all four</div>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <div class="row-wrap">
+                            <button class="btn" @click="directVentWindows()">Vent</button>
+                            <button class="btn" @click="directCloseWindows()">Close</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Seat heater + cooler -->
+                <div class="card">
+                    <div class="card-head">
+                        <div>
+                            <div class="card-head-title">Seat climate</div>
+                            <div class="card-head-sub">Heaters (5 positions × Off/Low/Med/High) and coolers (front pair)</div>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <template x-for="pos in ['FRONT_LEFT','FRONT_RIGHT','REAR_LEFT','REAR_CENTER','REAR_RIGHT']" :key="pos">
+                            <div class="row" style="gap:8px; margin-bottom:8px;">
+                                <span class="meta" style="min-width:120px;" x-text="pos.replace('_',' ').toLowerCase()"></span>
+                                <button class="btn sm ghost" @click="directSeatHeater(pos, 'OFF')">Off</button>
+                                <button class="btn sm ghost" @click="directSeatHeater(pos, 'LOW')">Low</button>
+                                <button class="btn sm ghost" @click="directSeatHeater(pos, 'MED')">Med</button>
+                                <button class="btn sm ghost" @click="directSeatHeater(pos, 'HIGH')">High</button>
+                            </div>
+                        </template>
+                        <hr style="border:0; border-top:1px solid var(--line); margin:12px 0;">
+                        <template x-for="pos in ['FRONT_LEFT','FRONT_RIGHT']" :key="'c-'+pos">
+                            <div class="row" style="gap:8px; margin-bottom:8px;">
+                                <span class="meta" style="min-width:120px;" x-text="'cool ' + pos.replace('_',' ').toLowerCase()"></span>
+                                <button class="btn sm ghost" @click="directSeatCooler(pos, 'OFF')">Off</button>
+                                <button class="btn sm ghost" @click="directSeatCooler(pos, 'LOW')">Low</button>
+                                <button class="btn sm ghost" @click="directSeatCooler(pos, 'MED')">Med</button>
+                                <button class="btn sm ghost" @click="directSeatCooler(pos, 'HIGH')">High</button>
+                            </div>
+                        </template>
+                    </div>
+                </div>
+
+                <!-- Security & access -->
+                <div class="card">
+                    <div class="card-head">
+                        <div>
+                            <div class="card-head-title">Security &amp; access</div>
+                            <div class="card-head-sub">Homelink · remote drive · valet · speed limit (PIN-gated)</div>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <div class="row-wrap">
+                            <button class="btn ghost" @click="directHomelink()"
+                                    title="Triggers your home garage opener. Needs the car's current location — hit Refresh state first.">Homelink</button>
+                            <button class="btn ghost" @click="directRemoteDrive()"
+                                    title="Remote-start primer (~2 min). Doesn't move the car.">Remote drive</button>
+                            <button class="btn ghost" @click="valetDialogOpen = true; valetPin = ''">Valet…</button>
+                            <button class="btn ghost" @click="speedLimitDialogOpen = true; speedLimitPin = ''">Speed limit…</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Send navigation -->
+                <div class="card">
+                    <div class="card-head">
+                        <div>
+                            <div class="card-head-title">Send navigation</div>
+                            <div class="card-head-sub">GPS coords (best), free-text search, or Google place-IDs waypoint string</div>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <div class="chip-row" style="margin-bottom:14px;">
+                            <button class="chip" :class="navMode==='gps'?'active':''" @click="navMode='gps'">GPS</button>
+                            <button class="chip" :class="navMode==='search'?'active':''" @click="navMode='search'">Search</button>
+                            <button class="chip" :class="navMode==='waypoints'?'active':''" @click="navMode='waypoints'">Waypoints</button>
+                        </div>
+                        <template x-if="navMode==='gps'">
+                            <div>
+                                <div class="form-row" style="gap:10px; margin-bottom:8px;">
+                                    <input type="number" step="0.000001" class="input mono" x-model.number="navLat" placeholder="latitude"  style="max-width:180px;">
+                                    <input type="number" step="0.000001" class="input mono" x-model.number="navLon" placeholder="longitude" style="max-width:180px;">
+                                    <button class="btn ghost" @click="if(vs?.location?.latitude!=null){navLat=vs.location.latitude;navLon=vs.location.longitude;}"
+                                            :disabled="vs?.location?.latitude == null">Use car position</button>
+                                </div>
+                                <div class="form-row" style="gap:10px;">
+                                    <input class="input" x-model="navLabel" placeholder="optional label (e.g. 'Home')" style="max-width:280px;">
+                                    <button class="btn primary" @click="directNavigateGps()" :disabled="!navLat || !navLon">Send to car</button>
+                                </div>
+                            </div>
+                        </template>
+                        <template x-if="navMode==='search'">
+                            <div class="form-row" style="gap:10px;">
+                                <input class="input" x-model="navQuery" placeholder="e.g. 'nearest Supercharger'" style="flex:1;">
+                                <button class="btn primary" @click="directNavigateSearch()" :disabled="!navQuery">Send to car</button>
+                            </div>
+                        </template>
+                        <template x-if="navMode==='waypoints'">
+                            <div>
+                                <input class="input mono" x-model="navWaypoints" placeholder="refId:ChIJ…,refId:ChIJ…">
+                                <button class="btn primary" style="margin-top:10px;" @click="directNavigateWaypoints()" :disabled="!navWaypoints">Send to car</button>
+                                <div class="enrol-help" style="margin-top:8px;">
+                                    Comma-separated Google Place IDs prefixed with <code>refId:</code>. Last entry is the destination; earlier entries are stops.
+                                </div>
+                            </div>
+                        </template>
+                    </div>
+                </div>
+
+                <!-- Boombox -->
+                <div class="card">
+                    <div class="card-head">
+                        <div>
+                            <div class="card-head-title">Boombox</div>
+                            <div class="card-head-sub">External pedestrian-warning speaker. IDs vary by firmware — try a few.</div>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <div class="row-wrap">
+                            <template x-for="s in [0,1,2,3,4,5,6,7,8]" :key="s">
+                                <button class="btn ghost" @click="directBoombox(s)" x-text="'Sound ' + s"></button>
+                            </template>
+                        </div>
+                        <div class="form-row" style="gap:8px; margin-top:10px; align-items:center;">
+                            <input type="number" class="input" min="0" max="65535" step="1"
+                                   x-model.number="boomboxId" placeholder="Sound ID" style="max-width:140px;">
+                            <button class="btn ghost" @click="directBoomboxFromInput()"
+                                    :disabled="boomboxId === null || boomboxId === '' || boomboxId < 0">Play</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Valet dialog -->
+                <div class="dialog-back" x-show="valetDialogOpen" x-cloak @keydown.escape.window="valetDialogOpen = false">
+                    <div class="dialog">
+                        <div class="dialog-head">
+                            <div class="dialog-title">Valet mode</div>
+                            <button class="dialog-close" @click="valetDialogOpen = false">&times;</button>
+                        </div>
+                        <div class="dialog-body">
+                            <p style="margin:0 0 12px; color:var(--fg-dim);">Limits acceleration, max speed, and disables Autopilot. PIN required to enable AND disable.</p>
+                            <input type="password" inputmode="numeric" pattern="\d{4}" maxlength="4"
+                                   class="input mono" x-model="valetPin" placeholder="4-digit PIN" style="width:160px;">
+                        </div>
+                        <div class="dialog-foot">
+                            <button class="btn ghost" @click="valetDialogOpen = false">Cancel</button>
+                            <button class="btn danger" :disabled="valetPin.length !== 4"
+                                    @click="directValetOff(); valetDialogOpen = false">Disable</button>
+                            <button class="btn primary" :disabled="valetPin.length !== 4"
+                                    @click="directValetOn(); valetDialogOpen = false">Enable</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Speed-limit dialog -->
+                <div class="dialog-back" x-show="speedLimitDialogOpen" x-cloak @keydown.escape.window="speedLimitDialogOpen = false">
+                    <div class="dialog">
+                        <div class="dialog-head">
+                            <div class="dialog-title">Speed limit</div>
+                            <button class="dialog-close" @click="speedLimitDialogOpen = false">&times;</button>
+                        </div>
+                        <div class="dialog-body">
+                            <p style="margin:0 0 12px; color:var(--fg-dim);">Cap the car's max speed with a 4-digit PIN. Activate/deactivate AND clearing the PIN itself all require the PIN.</p>
+                            <div class="form-row" style="gap:10px; margin-bottom:10px;">
+                                <input type="number" min="50" max="90" step="1" class="input" x-model.number="speedLimitMph"
+                                       placeholder="MPH" style="width:120px;">
+                                <span class="meta">mph (50–90)</span>
+                            </div>
+                            <input type="password" inputmode="numeric" pattern="\d{4}" maxlength="4"
+                                   class="input mono" x-model="speedLimitPin" placeholder="4-digit PIN" style="width:160px;">
+                        </div>
+                        <div class="dialog-foot" style="flex-wrap:wrap;">
+                            <button class="btn ghost" @click="speedLimitDialogOpen = false">Cancel</button>
+                            <button class="btn" :disabled="!speedLimitMph || speedLimitMph<50 || speedLimitMph>90"
+                                    @click="directSpeedLimitSet()">Set MPH</button>
+                            <button class="btn primary" :disabled="speedLimitPin.length !== 4"
+                                    @click="directSpeedLimitActivate(); speedLimitDialogOpen = false">Activate</button>
+                            <button class="btn" :disabled="speedLimitPin.length !== 4"
+                                    @click="directSpeedLimitDeactivate(); speedLimitDialogOpen = false">Deactivate</button>
+                            <button class="btn danger" :disabled="speedLimitPin.length !== 4"
+                                    @click="directSpeedLimitClearPin(); speedLimitDialogOpen = false">Clear PIN</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Device key (Phase 3a) -->
+                <div class="card">
+                    <div class="card-head">
+                        <div>
+                            <div class="card-head-title">Device key</div>
+                            <div class="card-head-sub">
+                                <span x-show="hasKey">
+                                    Generated · fingerprint <code style="font-size:11px;" x-text="keyFp"></code>
+                                </span>
+                                <span x-show="!hasKey">Not generated yet</span>
+                            </div>
+                        </div>
+                        <div class="card-head-spacer"></div>
+                        <span class="badge" :class="hasKey ? 'success' : 'muted'"
+                              x-text="hasKey ? 'ready' : 'absent'"></span>
+                    </div>
+                    <div class="card-body">
+                        <p style="color:var(--fg-dim); font-size:13px; margin:0 0 14px; line-height:1.55;">
+                            A P-256 keypair generated and stored on this device only.
+                            The private half is <strong>non-extractable</strong> —
+                            it lives inside WebCrypto, backed by the OS key store,
+                            and even this app cannot read it back.
+                            <span x-show="!hasKey">Generate one, then enrol the public half on the car (NFC card tap required).</span>
+                            <span x-show="hasKey">Phase 3c will switch every command to be signed by this key locally; until then the Pi still does the BLE crypto with its own key. Enrolling this key now is harmless — Tesla supports multiple keys per car.</span>
+                        </p>
+                        <div class="row-wrap">
+                            <button class="btn"
+                                    x-show="!hasKey"
+                                    @click="generateKey()">Generate device key</button>
+                            <button class="btn"
+                                    x-show="hasKey"
+                                    @click="enrolKey()"
+                                    :disabled="enrolling"
+                                    x-text="enrolling ? 'Sending…' : 'Enrol on car (NFC tap)'"></button>
+                            <button class="btn ghost"
+                                    x-show="hasKey"
+                                    @click="generateKey()">Rotate</button>
+                        </div>
+                        <div class="row-wrap" style="margin-top:14px;" x-show="hasKey">
+                            <button class="btn primary"
+                                    @click="directHonk()"
+                                    :disabled="directBusy"
+                                    x-text="directBusy ? 'Sending…' : 'Honk (via device key)'"></button>
+                            <button class="btn"
+                                    @click="directFlashLights()"
+                                    :disabled="directBusy">Flash lights (via device key)</button>
+                        </div>
+                        <div x-show="directStatus" class="meta" style="margin-top:10px; padding:10px 12px; background:var(--bg-elev-2); border-radius:6px;"
+                             x-text="directStatus"></div>
+                        <div x-show="keyError" class="protected-banner" style="margin-top:12px;" x-text="keyError"></div>
+                    </div>
+                </div>
+
+                <!-- Diagnostics — durable activity log so you can see
+                     what happened at the car without DevTools. -->
+                <div class="card" x-data="{ open: false }">
+                    <div class="card-head" @click="open = !open" style="cursor: pointer;">
+                        <div>
+                            <div class="card-head-title">Activity log <span style="color:var(--fg-mute); font-size:11px; font-weight:400;">(<span x-text="airgap.getRecentActivity(100).length"></span> entries)</span></div>
+                            <div class="card-head-sub">Click to <span x-text="open ? 'collapse' : 'expand'"></span>. Persists across reloads — pin failures, retries, and refresh events for the last 100 commands.</div>
+                        </div>
+                        <div class="card-head-spacer"></div>
+                        <span style="color:var(--fg-mute); font-size:18px;" x-text="open ? '▾' : '▸'"></span>
+                    </div>
+                    <div class="card-body" x-show="open" x-cloak>
+                        <div class="row-wrap" style="margin-bottom:12px;">
+                            <button class="btn sm ghost" @click="
+                                const dump = JSON.stringify(airgap.getRecentActivity(100), null, 2);
+                                navigator.clipboard.writeText(dump);
+                                notify('Activity log copied (' + airgap.getRecentActivity(100).length + ' entries)', 'success');
+                            ">Copy as JSON</button>
+                            <button class="btn sm ghost" @click="airgap.clearActivityLog(); notify('Activity log cleared', 'success')">Clear</button>
+                            <span class="meta" style="align-self:center; margin-left:auto;">Most recent first · auto-trimmed to 100</span>
+                        </div>
+                        <table class="tbl">
+                            <thead>
+                                <tr>
+                                    <th style="width:130px;">When</th>
+                                    <th>Label</th>
+                                    <th style="width:60px;">Dom</th>
+                                    <th style="width:50px;">Try</th>
+                                    <th style="width:90px;">Result</th>
+                                    <th style="width:70px;">Fault</th>
+                                    <th style="width:60px;">ms</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <template x-for="(r, i) in airgap.getRecentActivity(50)" :key="r.at + '-' + i">
+                                    <tr>
+                                        <td class="cell-mac" x-text="new Date(r.at).toLocaleTimeString()"></td>
+                                        <td class="cell-mac" x-text="r.label"></td>
+                                        <td class="cell-mac" x-text="r.domain === 2 ? 'VCSEC' : r.domain === 3 ? 'Info' : ''"></td>
+                                        <td class="cell-mac" x-text="r.attempt ?? ''"></td>
+                                        <td>
+                                            <span class="badge"
+                                                  :class="r.result === 'ok' ? 'success' : r.result === 'error' ? 'danger' : 'muted'"
+                                                  x-text="r.result"></span>
+                                        </td>
+                                        <td class="cell-mac" :title="r.note ?? ''" x-text="r.fault != null ? r.fault : ''"></td>
+                                        <td class="cell-mac" x-text="r.durationMs ?? ''"></td>
+                                    </tr>
+                                </template>
+                                <template x-if="airgap.getRecentActivity(1).length === 0">
+                                    <tr><td colspan="7" style="text-align:center; color:var(--fg-mute); padding:22px;">No activity yet. Try a command.</td></tr>
+                                </template>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- This device — token info + self-revoke (Thread E) -->
+                <div class="card">
+                    <div class="card-head">
+                        <div>
+                            <div class="card-head-title">This device</div>
+                            <div class="card-head-sub">
+                                Bearer-token info for this client. To add another device
+                                or rotate this one, issue a new token from the Pi's
+                                <strong>/settings → BLE client tokens</strong> page.
+                            </div>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <template x-if="tokenInfo">
+                            <div>
+                                <div class="row" style="gap:24px; margin-bottom:14px;">
+                                    <div>
+                                        <div class="meta">Name</div>
+                                        <div class="cell-primary" x-text="tokenInfo.name"></div>
+                                    </div>
+                                    <div>
+                                        <div class="meta">Created</div>
+                                        <div class="cell-mac" x-text="new Date(tokenInfo.created_at).toLocaleString()"></div>
+                                    </div>
+                                    <div>
+                                        <div class="meta">Last used</div>
+                                        <div class="cell-mac" x-text="tokenInfo.last_used_at ? new Date(tokenInfo.last_used_at).toLocaleString() : '—'"></div>
+                                    </div>
+                                </div>
+                                <button class="btn danger" @click="revokeSelf()" :disabled="revokingSelf"
+                                        x-text="revokingSelf ? 'Revoking…' : 'Revoke this device’s access'"></button>
+                                <div class="enrol-help" style="margin-top:8px;">
+                                    Server-side revoke. After this, the client app on this
+                                    device can no longer drive the car until the Pi operator
+                                    issues a fresh token. The car-side enrolment of the device
+                                    key persists.
+                                </div>
+                            </div>
+                        </template>
+                        <template x-if="!tokenInfo">
+                            <div class="meta">No token info loaded.</div>
+                        </template>
+                    </div>
+                </div>
+
+                <!-- Activity strip -->
+                <div class="card">
+                    <div class="card-head">
+                        <div>
+                            <div class="card-head-title">Recent commands</div>
+                            <div class="card-head-sub">
+                                Last <span x-text="log.length"></span> entries — audit trail from the Pi
+                            </div>
+                        </div>
+                        <div class="card-head-spacer"></div>
+                        <button class="btn-icon" @click="refresh('full')" title="Refresh">
+                            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M14 8a6 6 0 1 0-2 4.5"/><path d="M14 3v4h-4"/></svg>
+                        </button>
+                    </div>
+                    <div class="card-body" style="padding:0;">
+                        <table class="tbl">
+                            <thead>
+                                <tr><th style="width:180px;">When</th><th>Command</th><th style="width:80px;">Result</th></tr>
+                            </thead>
+                            <tbody>
+                                <template x-for="r in log" :key="r.at">
+                                    <tr>
+                                        <td class="cell-mac" x-text="new Date(r.at).toLocaleString()"></td>
+                                        <td class="cell-mac" x-text="r.command"></td>
+                                        <td>
+                                            <span class="badge" :class="r.succeeded ? 'success' : 'danger'"
+                                                  x-text="r.succeeded ? 'ok' : 'err'"></span>
+                                        </td>
+                                    </tr>
+                                </template>
+                                <template x-if="log.length === 0">
+                                    <tr><td colspan="3" style="text-align:center; color:var(--fg-mute); padding:22px;">No commands yet.</td></tr>
+                                </template>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </template>
+
+        <div id="toast-container"></div>
+    </div>
+
+    <script src="alpine.min.js" defer></script>
+    <script src="protobuf.min.js"></script>
+    <script src="proto.js"></script>
+    <script src="crypto.js"></script>
+    <script src="session.js"></script>
+    <script src="state.js"></script>
+    <script src="keystore.js"></script>
+    <script src="activity-log.js"></script>
+    <script src="app.js"></script>
+</body>
+</html>

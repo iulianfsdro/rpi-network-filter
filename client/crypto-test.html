@@ -1,0 +1,614 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+    <meta charset="utf-8">
+    <title>crypto-test — airgap</title>
+    <link rel="stylesheet" href="airgap.css">
+    <style>
+        body { overflow: auto; padding: 36px 28px 80px; max-width: 900px; margin: 0 auto; }
+        h1 { font-size: 30px; letter-spacing: -0.03em; margin: 0 0 6px; }
+        .sub { color: var(--fg-mute); font-size: 13px; margin-bottom: 28px; }
+        .vector {
+            background: var(--bg-elev); border-radius: var(--radius);
+            padding: 18px 22px; margin-bottom: 14px;
+            font-family: "JetBrains Mono", ui-monospace, monospace;
+            font-size: 11.5px; line-height: 1.6;
+        }
+        .vector .label { color: var(--fg-mute); }
+        .vector .val { color: var(--fg); word-break: break-all; }
+        .vector .ok  { color: var(--ok); }
+        .vector .err { color: var(--danger); }
+        .case-head { font-size: 14px; color: var(--fg); font-weight: 500; margin-bottom: 10px; display: flex; gap: 10px; align-items: baseline; }
+        .case-head .badge { padding: 2px 10px; border-radius: 100px; font-size: 11px; font-weight: 500; }
+        .case-head .badge.pass { background: var(--ok-faint); color: var(--ok); }
+        .case-head .badge.fail { background: var(--danger-faint); color: var(--danger); }
+        .case-head .badge.pending { background: var(--bg-elev-2); color: var(--fg-mute); }
+    </style>
+</head>
+<body>
+    <h1>airgap crypto-test</h1>
+    <p class="sub">
+        Runs vehicle-command's own ECDH / KDF test vectors through the WebCrypto port.
+        Each PASS means the TypeScript output is bit-identical to the Go SDK's.
+        Reload the page to re-run.
+    </p>
+
+    <div id="results"></div>
+
+    <script src="protobuf.min.js"></script>
+    <script src="proto.js"></script>
+    <script src="crypto.js"></script>
+    <script>
+        // ── Test vectors from
+        //     vehicle-command/internal/authentication/ecdh_test.go ──
+        //
+        // The vehicle (us) holds privateKey d. The phone is the
+        // counterpart; its public key is supplied as a raw SEC1
+        // uncompressed point. ScalarMult(myPriv, peerPub).X gives
+        // back correctSharedSecret. SHA1(correctSharedSecret)[:16] is
+        // the AES-GCM session key the SDK would use.
+        //
+        // d_jwk / x_jwk / y_jwk are the same scalar + derived public
+        // point, base64url-no-padding encoded — the form WebCrypto's
+        // importKey('jwk', ...) consumes for P-256 private keys.
+        const D_JWK = "UmD41hE4ddhvjuj-o0DfH_tAxli1RV6MM9eXxTpBr9M";
+        const X_JWK = "f5hMHstJB56mM_8mVjs0uVkWxY6xQDFSxAo03_NWQmU";
+        const Y_JWK = "-D_stR0mVCzfq7AUAikz19TS2cgFRyUFy7TRoPF6yXY";
+
+        const PHONE_PUBKEY_HEX =
+            "04" +
+            "07fb60b65b94e0de4a954c53be10003d9e69918dedfda5f4e9efb9ebd8c5bd67" +
+            "2a53991c4068865d5fb44f97f6cecf8398f261dd1d7bc69be676afdc8ffacbcc";
+
+        const EXPECTED_SHARED_SECRET_HEX =
+            "0072d5b815207a04f0c795fba0ba9e8add3f1f57148c51fface22ca15e6fd845";
+
+        // Each case is its own renderer + checker. Renders the
+        // inputs, runs the check, prints the actual + expected bytes,
+        // flips the badge.
+        const results = document.getElementById('results');
+
+        function card(title) {
+            const el = document.createElement('div');
+            el.className = 'vector';
+            el.innerHTML = `
+                <div class="case-head">
+                    <span>${title}</span>
+                    <span class="badge pending">running…</span>
+                </div>
+                <div class="body"></div>
+            `;
+            results.appendChild(el);
+            return {
+                pass(html) {
+                    el.querySelector('.badge').textContent = 'PASS';
+                    el.querySelector('.badge').className = 'badge pass';
+                    el.querySelector('.body').innerHTML = html;
+                },
+                fail(html) {
+                    el.querySelector('.badge').textContent = 'FAIL';
+                    el.querySelector('.badge').className = 'badge fail';
+                    el.querySelector('.body').innerHTML = html;
+                },
+            };
+        }
+
+        function row(label, val, klass) {
+            return `<div><span class="label">${label}:</span> <span class="val ${klass||''}">${val}</span></div>`;
+        }
+
+        // ── Case 1: ECDH shared X matches SDK vector ──
+        (async () => {
+            const c = card('ECDH(my_d, phone_pub).X');
+            try {
+                const myPriv = await crypto.subtle.importKey(
+                    'jwk',
+                    { kty: 'EC', crv: 'P-256', d: D_JWK, x: X_JWK, y: Y_JWK, ext: false },
+                    { name: 'ECDH', namedCurve: 'P-256' },
+                    false, ['deriveBits']
+                );
+                const peerPubBytes = airgap.hexToBytes(PHONE_PUBKEY_HEX);
+                const peerPub = await airgap.importPeerPubkey(peerPubBytes);
+                const sharedBuf = await crypto.subtle.deriveBits(
+                    { name: 'ECDH', public: peerPub }, myPriv, 256
+                );
+                const actualHex = airgap.bytesToHex(new Uint8Array(sharedBuf));
+                const ok = actualHex === EXPECTED_SHARED_SECRET_HEX;
+                const html = row('expected', EXPECTED_SHARED_SECRET_HEX) +
+                             row('actual  ', actualHex, ok ? 'ok' : 'err');
+                if (ok) c.pass(html); else c.fail(html);
+            } catch (e) {
+                c.fail(`<div class="err">threw: ${e.message || e}</div>`);
+            }
+        })();
+
+        // ── Case 2: KDF (SHA-1 of shared, take first 16 bytes) ──
+        (async () => {
+            const c = card('KDF: SHA-1(shared)[:16] = AES-GCM session key');
+            try {
+                const myPriv = await crypto.subtle.importKey(
+                    'jwk',
+                    { kty: 'EC', crv: 'P-256', d: D_JWK, x: X_JWK, y: Y_JWK, ext: false },
+                    { name: 'ECDH', namedCurve: 'P-256' },
+                    false, ['deriveBits']
+                );
+                const peerPub = await airgap.importPeerPubkey(airgap.hexToBytes(PHONE_PUBKEY_HEX));
+                const actualKey = await airgap.deriveSessionKeyMaterial(myPriv, peerPub);
+
+                // Compute the expected key independently:
+                // SHA-1(EXPECTED_SHARED_SECRET)[:16].
+                const expectedShared = airgap.hexToBytes(EXPECTED_SHARED_SECRET_HEX);
+                const expectedDigest = await crypto.subtle.digest('SHA-1', expectedShared);
+                const expectedKey = new Uint8Array(expectedDigest).slice(0, 16);
+
+                const actualHex = airgap.bytesToHex(actualKey);
+                const expectedHex = airgap.bytesToHex(expectedKey);
+                const ok = actualHex === expectedHex;
+                const html =
+                    row('expected', expectedHex) +
+                    row('actual  ', actualHex, ok ? 'ok' : 'err');
+                if (ok) c.pass(html); else c.fail(html);
+            } catch (e) {
+                c.fail(`<div class="err">threw: ${e.message || e}</div>`);
+            }
+        })();
+
+        // ── Case 3: importPeerPubkey rejects malformed input ──
+        (async () => {
+            const c = card('importPeerPubkey input validation');
+            const cases = [
+                { bytes: new Uint8Array(0),         expect: 'reject empty' },
+                { bytes: new Uint8Array(32),        expect: 'reject 32 bytes' },
+                { bytes: new Uint8Array(65),        expect: 'reject 65 bytes with 0x00 prefix' },
+                {
+                    bytes: (() => { const b = new Uint8Array(65); b[0] = 0x05; return b; })(),
+                    expect: 'reject 65 bytes with 0x05 prefix',
+                },
+            ];
+            const lines = [];
+            let failed = false;
+            for (const tc of cases) {
+                try {
+                    await airgap.importPeerPubkey(tc.bytes);
+                    lines.push(row(tc.expect, '✗ accepted (BAD)', 'err'));
+                    failed = true;
+                } catch (e) {
+                    lines.push(row(tc.expect, '✓ rejected: ' + e.message, 'ok'));
+                }
+            }
+            if (!failed) c.pass(lines.join('')); else c.fail(lines.join(''));
+        })();
+
+        // ── Case 4: deriveSessionKey returns an AES-GCM key that
+        //     actually encrypts + decrypts a roundtrip. (Sanity:
+        //     proves the importKey wrapping path works.)
+        (async () => {
+            const c = card('AES-GCM round-trip on derived key');
+            try {
+                const myPriv = await crypto.subtle.importKey(
+                    'jwk',
+                    { kty: 'EC', crv: 'P-256', d: D_JWK, x: X_JWK, y: Y_JWK, ext: false },
+                    { name: 'ECDH', namedCurve: 'P-256' },
+                    false, ['deriveBits']
+                );
+                const peerPub = await airgap.importPeerPubkey(airgap.hexToBytes(PHONE_PUBKEY_HEX));
+                const sessionKey = await airgap.deriveSessionKey(myPriv, peerPub);
+
+                const nonce = crypto.getRandomValues(new Uint8Array(12));
+                const plaintext = new TextEncoder().encode('hello tesla');
+                const aad = new TextEncoder().encode('test-aad');
+                const ct = new Uint8Array(await crypto.subtle.encrypt(
+                    { name: 'AES-GCM', iv: nonce, additionalData: aad }, sessionKey, plaintext
+                ));
+                const pt = new Uint8Array(await crypto.subtle.decrypt(
+                    { name: 'AES-GCM', iv: nonce, additionalData: aad }, sessionKey, ct
+                ));
+                const decoded = new TextDecoder().decode(pt);
+                const ok = decoded === 'hello tesla';
+                const html = row('plaintext', 'hello tesla') +
+                             row('ciphertext+tag', airgap.bytesToHex(ct).slice(0, 80) + '…') +
+                             row('decoded', decoded, ok ? 'ok' : 'err');
+                if (ok) c.pass(html); else c.fail(html);
+            } catch (e) {
+                c.fail(`<div class="err">threw: ${e.message || e}</div>`);
+            }
+        })();
+
+        // ── Vectors for cases 5-9, generated by a Go program that
+        //     mirrors authentication/metadata.go exactly. Fixtures:
+        //
+        //       domain          = INFOTAINMENT (3)
+        //       verifierName    = "5YJ3E1EA1AAAA0001"
+        //       epoch           = 01..10  (16 bytes)
+        //       expiresAt       = 60
+        //       counter         = 1
+        //       flags           = 0 (omitted from metadata)
+        //
+        //       sessionKey      = fedcba9876543210 0123456789abcdef
+        //       nonce           = 00..0b           (12 bytes)
+        //       plaintext       = "honk honk"
+        //
+        const META_EXPECTED_BYTES_HEX =
+            "000105010103021135594a334531454131414141413030303103100102030405" +
+            "060708090a0b0c0d0e0f1004040000003c050400000001ff";
+        const META_EXPECTED_AAD_HEX =
+            "5d84d3aca04f92e941e335424b16203d9e2713299c5130a82021c972d46d0e47";
+        const SESSION_KEY_HEX  = "fedcba98765432100123456789abcdef";
+        const TEST_NONCE_HEX   = "000102030405060708090a0b";
+        const TEST_PLAIN_HEX   = "686f6e6b20686f6e6b"; // "honk honk"
+        const EXPECTED_CT_HEX  = "60480546bad808a9be";
+        const EXPECTED_TAG_HEX = "6cd65a1ce16df96e7f979081e0dac93b";
+        const EXPECTED_SUBKEY_SESSION_INFO_HEX =
+            "a562bca5db03d145a449387941e30f48210563504ca4f4d43ca2ed72c29120be";
+
+        // ── Case 5: metadata serialisation byte-for-byte ──
+        // SDK reference value lives in META_EXPECTED_BYTES_HEX. Same
+        // ordered tag-length-value framing this function MUST produce.
+        (async () => {
+            const c = card('Metadata block serialisation');
+            try {
+                const m = new airgap.MetadataBlockBuilder();
+                m.add(airgap.TAG.SIGNATURE_TYPE,  new Uint8Array([airgap.SIGNATURE_TYPE.AES_GCM_PERSONALIZED]));
+                m.add(airgap.TAG.DOMAIN,          new Uint8Array([airgap.DOMAIN.INFOTAINMENT]));
+                m.add(airgap.TAG.PERSONALIZATION, new TextEncoder().encode("5YJ3E1EA1AAAA0001"));
+                m.add(airgap.TAG.EPOCH, new Uint8Array([
+                    0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,
+                    0x09,0x0a,0x0b,0x0c,0x0d,0x0e,0x0f,0x10,
+                ]));
+                m.addUint32(airgap.TAG.EXPIRES_AT, 60);
+                m.addUint32(airgap.TAG.COUNTER,    1);
+                // bytes() excludes TAG_END; append 0xff to match SDK.
+                const head = m.bytes();
+                const full = new Uint8Array(head.length + 1);
+                full.set(head, 0);
+                full[head.length] = airgap.TAG.END;
+                const actual = airgap.bytesToHex(full);
+                const ok = actual === META_EXPECTED_BYTES_HEX;
+                const html = row('expected', META_EXPECTED_BYTES_HEX) +
+                             row('actual  ', actual, ok ? 'ok' : 'err');
+                if (ok) c.pass(html); else c.fail(html);
+            } catch (e) {
+                c.fail(`<div class="err">threw: ${e.message || e}</div>`);
+            }
+        })();
+
+        // ── Case 6: buildAesGcmMetadata returns the SHA-256 digest ──
+        // The SDK uses this digest as AES-GCM's AAD. Matches the
+        // expected hash byte-for-byte.
+        (async () => {
+            const c = card('buildAesGcmMetadata → SHA-256 digest');
+            try {
+                const digest = await airgap.buildAesGcmMetadata({
+                    domain:        airgap.DOMAIN.INFOTAINMENT,
+                    verifierName: "5YJ3E1EA1AAAA0001",
+                    epoch: new Uint8Array([
+                        0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,
+                        0x09,0x0a,0x0b,0x0c,0x0d,0x0e,0x0f,0x10,
+                    ]),
+                    expiresAt: 60,
+                    counter:    1,
+                    flags:      0,
+                });
+                const actual = airgap.bytesToHex(digest);
+                const ok = actual === META_EXPECTED_AAD_HEX;
+                const html = row('expected', META_EXPECTED_AAD_HEX) +
+                             row('actual  ', actual, ok ? 'ok' : 'err');
+                if (ok) c.pass(html); else c.fail(html);
+            } catch (e) {
+                c.fail(`<div class="err">threw: ${e.message || e}</div>`);
+            }
+        })();
+
+        // ── Case 7: AES-GCM ciphertext + tag match Go's output ──
+        // Same key + nonce + AAD digest + plaintext as the Go
+        // fixture; AES-GCM is deterministic, so byte-equality holds.
+        (async () => {
+            const c = card('AES-GCM ciphertext matches Go fixture');
+            try {
+                const keyBytes = airgap.hexToBytes(SESSION_KEY_HEX);
+                const key = await crypto.subtle.importKey(
+                    'raw', keyBytes,
+                    { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']
+                );
+                const nonce = airgap.hexToBytes(TEST_NONCE_HEX);
+                const plaintext = airgap.hexToBytes(TEST_PLAIN_HEX);
+                const aad = airgap.hexToBytes(META_EXPECTED_AAD_HEX);
+                const out = await airgap.aesGcmEncryptWithNonce(key, plaintext, aad, nonce);
+                const ctHex = airgap.bytesToHex(out.ciphertext);
+                const tagHex = airgap.bytesToHex(out.tag);
+                const ok = ctHex === EXPECTED_CT_HEX && tagHex === EXPECTED_TAG_HEX;
+                const html = row('expected CT ', EXPECTED_CT_HEX) +
+                             row('actual CT   ', ctHex, ctHex === EXPECTED_CT_HEX ? 'ok' : 'err') +
+                             row('expected tag', EXPECTED_TAG_HEX) +
+                             row('actual tag  ', tagHex, tagHex === EXPECTED_TAG_HEX ? 'ok' : 'err');
+                if (ok) c.pass(html); else c.fail(html);
+            } catch (e) {
+                c.fail(`<div class="err">threw: ${e.message || e}</div>`);
+            }
+        })();
+
+        // ── Case 8: AES-GCM round-trip (encrypt → decrypt) recovers
+        //     plaintext; corrupting the AAD breaks decrypt. ──
+        (async () => {
+            const c = card('aesGcmDecrypt round-trip + AAD tamper rejected');
+            try {
+                const key = await crypto.subtle.importKey(
+                    'raw', airgap.hexToBytes(SESSION_KEY_HEX),
+                    { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']
+                );
+                const nonce = airgap.hexToBytes(TEST_NONCE_HEX);
+                const plaintext = airgap.hexToBytes(TEST_PLAIN_HEX);
+                const aad = airgap.hexToBytes(META_EXPECTED_AAD_HEX);
+
+                const out = await airgap.aesGcmEncryptWithNonce(key, plaintext, aad, nonce);
+                const pt = await airgap.aesGcmDecrypt(key, nonce, out.ciphertext, out.tag, aad);
+                const roundtripOk = airgap.bytesToHex(pt) === airgap.bytesToHex(plaintext);
+
+                // Tamper: flip one bit in the AAD; decrypt must throw.
+                const tamperedAad = new Uint8Array(aad);
+                tamperedAad[0] ^= 0x01;
+                let rejected = false;
+                try {
+                    await airgap.aesGcmDecrypt(key, nonce, out.ciphertext, out.tag, tamperedAad);
+                } catch (e) {
+                    rejected = true;
+                }
+                const ok = roundtripOk && rejected;
+                const html = row('round-trip', roundtripOk ? '✓' : '✗ plaintext mismatch', roundtripOk ? 'ok' : 'err') +
+                             row('AAD tamper', rejected ? '✓ rejected' : '✗ ACCEPTED (BAD)', rejected ? 'ok' : 'err');
+                if (ok) c.pass(html); else c.fail(html);
+            } catch (e) {
+                c.fail(`<div class="err">threw: ${e.message || e}</div>`);
+            }
+        })();
+
+        // ── Case 9: HMAC-SHA256 subkey derivation for "session info"
+        //     matches the SDK byte-for-byte. ──
+        (async () => {
+            const c = card('hmacSubkey("session info") matches SDK');
+            try {
+                const sub = await airgap.hmacSubkey(
+                    airgap.hexToBytes(SESSION_KEY_HEX),
+                    'session info',
+                );
+                const actual = airgap.bytesToHex(sub);
+                const ok = actual === EXPECTED_SUBKEY_SESSION_INFO_HEX;
+                const html = row('expected', EXPECTED_SUBKEY_SESSION_INFO_HEX) +
+                             row('actual  ', actual, ok ? 'ok' : 'err');
+                if (ok) c.pass(html); else c.fail(html);
+            } catch (e) {
+                c.fail(`<div class="err">threw: ${e.message || e}</div>`);
+            }
+        })();
+
+        // ── Phase 3c-3 vectors: protobuf wire-format.
+        //     Generated by /tmp/proto-vec.go invoking the SDK's own
+        //     proto.Marshal. Same inputs in → same bytes out from
+        //     protobuf.js means our codec is byte-compatible.
+        const SESSION_INFO_HEX =
+            "082a120704aabbccddeeff1a100102030405060708090a0b0c0d0e0f102587d61200";
+        const RM_SESSION_INFO_REQ_HEX =
+            "320208023a061204feedface9a0303abcdef720a0a080411223344556677";
+        const RM_AESGCM_PAYLOAD_HEX =
+            "320208033a061204feedface920304010203045204deadbeef" +
+            "6a3b2a390a100102030405060708090a0b0c0d0e0f10120c000102030405060708090a0b" +
+            "1801253c0000002a106cd65a1ce16df96e7f979081e0dac93b";
+        const ACTION_HONK_HEX = "1203da0100";
+        const VCSEC_GET_STATUS_HEX = "0a00";
+
+        // ── Case 10: protobuf loader resolves without error.
+        //     Gates every subsequent proto test — they all dereference
+        //     airgap.proto.RoutableMessage etc.
+        (async () => {
+            const c = card('protobuf.js loads SDK .proto files');
+            try {
+                const p = await airgap.loadProto();
+                const ok = !!(p.RoutableMessage && p.SessionInfo && p.Action &&
+                              p.SignatureData && p.VCSECUnsignedMessage);
+                const html = row('RoutableMessage', p.RoutableMessage?.fullName || 'missing', ok ? 'ok' : 'err') +
+                             row('SessionInfo    ', p.SessionInfo?.fullName || 'missing', ok ? 'ok' : 'err') +
+                             row('Action         ', p.Action?.fullName || 'missing', ok ? 'ok' : 'err') +
+                             row('SignatureData  ', p.SignatureData?.fullName || 'missing', ok ? 'ok' : 'err');
+                if (ok) c.pass(html); else c.fail(html);
+            } catch (e) {
+                c.fail(`<div class="err">threw: ${e.message || e}</div>`);
+            }
+        })();
+
+        // ── Case 11: SessionInfo decode of SDK-emitted bytes ──
+        //
+        // Why decode instead of "encode + compare bytes"? proto3 lets
+        // implementations choose whether to emit fields with default
+        // values; protobuf.js emits `status: 0` explicitly while Go's
+        // proto.Marshal omits it. Both are spec-legal — the wire
+        // format is multiply-canonical. The semantic test that
+        // matters is "given the SDK's bytes, do we read the same
+        // fields back?" — that's what makes our codec interoperable
+        // with the live car.
+        (async () => {
+            const c = card('SessionInfo decode of SDK bytes');
+            try {
+                const p = await airgap.loadProto();
+                const decoded = airgap.decodeMessage(p.SessionInfo, airgap.hexToBytes(SESSION_INFO_HEX));
+                const ok =
+                    decoded.counter === 42 &&
+                    decoded.clockTime === 1234567 &&
+                    decoded.status === 0 &&
+                    airgap.bytesToHex(decoded.publicKey) === "04aabbccddeeff" &&
+                    airgap.bytesToHex(decoded.epoch) === "0102030405060708090a0b0c0d0e0f10";
+                const html =
+                    row('counter   ', String(decoded.counter), decoded.counter === 42 ? 'ok' : 'err') +
+                    row('publicKey ', airgap.bytesToHex(decoded.publicKey)) +
+                    row('epoch     ', airgap.bytesToHex(decoded.epoch)) +
+                    row('clockTime ', String(decoded.clockTime)) +
+                    row('status    ', String(decoded.status));
+                if (ok) c.pass(html); else c.fail(html);
+            } catch (e) {
+                c.fail(`<div class="err">threw: ${e.message || e}</div>`);
+            }
+        })();
+
+        // ── Case 12: SessionInfo round-trip — encode + decode recovers
+        //     the original field values.
+        (async () => {
+            const c = card('SessionInfo encode → decode round-trip');
+            try {
+                const p = await airgap.loadProto();
+                const fields = {
+                    counter: 42,
+                    publicKey: new Uint8Array([0x04, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
+                    epoch: airgap.hexToBytes("0102030405060708090a0b0c0d0e0f10"),
+                    clockTime: 1234567,
+                    status: 0,
+                };
+                const bytes = airgap.encodeMessage(p.SessionInfo, fields);
+                const decoded = airgap.decodeMessage(p.SessionInfo, bytes);
+                const ok =
+                    decoded.counter === 42 &&
+                    decoded.clockTime === 1234567 &&
+                    decoded.status === 0 &&
+                    airgap.bytesToHex(decoded.publicKey) === "04aabbccddeeff" &&
+                    airgap.bytesToHex(decoded.epoch) === "0102030405060708090a0b0c0d0e0f10";
+                const html = row('decoded.counter   ', String(decoded.counter), ok ? 'ok' : 'err') +
+                             row('decoded.clockTime ', String(decoded.clockTime)) +
+                             row('decoded.publicKey ', airgap.bytesToHex(decoded.publicKey)) +
+                             row('decoded.epoch     ', airgap.bytesToHex(decoded.epoch)) +
+                             row('decoded.status    ', String(decoded.status));
+                if (ok) c.pass(html); else c.fail(html);
+            } catch (e) {
+                c.fail(`<div class="err">threw: ${e.message || e}</div>`);
+            }
+        })();
+
+        // ── Case 13: RoutableMessage(SessionInfoRequest) decode ──
+        //
+        // Decode the SDK's bytes for a SessionInfoRequest payload
+        // and assert every field survives: to/from destinations
+        // (oneof case), session_info_request (the payload oneof
+        // case), uuid. proto3 lets fields land in any order on the
+        // wire so byte-equality across implementations isn't the
+        // right gate; structural equality is.
+        (async () => {
+            const c = card('RoutableMessage(SessionInfoRequest) decode');
+            try {
+                const p = await airgap.loadProto();
+                const decoded = airgap.decodeMessage(p.RoutableMessage,
+                    airgap.hexToBytes(RM_SESSION_INFO_REQ_HEX));
+                const toOk   = decoded.toDestination?.domain === 2;          // VEHICLE_SECURITY
+                const fromOk = airgap.bytesToHex(decoded.fromDestination?.routingAddress || new Uint8Array()) === "feedface";
+                const reqOk  = decoded.sessionInfoRequest &&
+                               airgap.bytesToHex(decoded.sessionInfoRequest.publicKey) === "0411223344556677";
+                const uuidOk = airgap.bytesToHex(decoded.uuid) === "abcdef";
+                // protobuf.js exposes the oneof case via a synthetic
+                // property named after the oneof itself — for the
+                // `oneof payload { ... }` in RoutableMessage, the
+                // decoded object has `payload: "sessionInfoRequest"`
+                // (or whichever case is set). Cleaner than guessing
+                // which sub-message is non-default.
+                const payloadCase = decoded.payload;
+                const payloadOk = payloadCase === 'sessionInfoRequest';
+                const ok = toOk && fromOk && reqOk && uuidOk && payloadOk;
+                const html =
+                    row('to.domain        ', String(decoded.toDestination?.domain), toOk ? 'ok' : 'err') +
+                    row('from.routingAddr ', airgap.bytesToHex(decoded.fromDestination?.routingAddress || new Uint8Array()), fromOk ? 'ok' : 'err') +
+                    row('payload oneof    ', payloadCase || '(none)', payloadOk ? 'ok' : 'err') +
+                    row('payload.publicKey', airgap.bytesToHex(decoded.sessionInfoRequest?.publicKey || new Uint8Array()), reqOk ? 'ok' : 'err') +
+                    row('uuid             ', airgap.bytesToHex(decoded.uuid), uuidOk ? 'ok' : 'err');
+                if (ok) c.pass(html); else c.fail(html);
+            } catch (e) {
+                c.fail(`<div class="err">threw: ${e.message || e}</div>`);
+            }
+        })();
+
+        // ── Case 14: RoutableMessage(AES-GCM payload) decode ──
+        //
+        // The shape every command goes out as. Tests two oneofs at
+        // once (payload + sub_sigData) plus deeply-nested
+        // AES_GCM_PersonalizedData fields.
+        (async () => {
+            const c = card('RoutableMessage(AES-GCM payload) decode');
+            try {
+                const p = await airgap.loadProto();
+                const decoded = airgap.decodeMessage(p.RoutableMessage,
+                    airgap.hexToBytes(RM_AESGCM_PAYLOAD_HEX));
+                // protobuf.js keeps the original (underscore-bearing)
+                // field name from .proto rather than camelCasing the
+                // SCREAMING_CASE part. AES_GCM_Personalized_data →
+                // AES_GCM_PersonalizedData.
+                const sig = decoded.signatureData?.AES_GCM_PersonalizedData;
+                const checks = [
+                    ['to.domain          ', String(decoded.toDestination?.domain), decoded.toDestination?.domain === 3],
+                    ['payload bytes      ', airgap.bytesToHex(decoded.protobufMessageAsBytes || new Uint8Array()),
+                                            airgap.bytesToHex(decoded.protobufMessageAsBytes || new Uint8Array()) === "deadbeef"],
+                    ['sig.epoch          ', airgap.bytesToHex(sig?.epoch || new Uint8Array()),
+                                            airgap.bytesToHex(sig?.epoch || new Uint8Array()) === "0102030405060708090a0b0c0d0e0f10"],
+                    ['sig.nonce          ', airgap.bytesToHex(sig?.nonce || new Uint8Array()),
+                                            airgap.bytesToHex(sig?.nonce || new Uint8Array()) === "000102030405060708090a0b"],
+                    ['sig.counter        ', String(sig?.counter), sig?.counter === 1],
+                    ['sig.expiresAt      ', String(sig?.expiresAt), sig?.expiresAt === 60],
+                    ['sig.tag            ', airgap.bytesToHex(sig?.tag || new Uint8Array()),
+                                            airgap.bytesToHex(sig?.tag || new Uint8Array()) === "6cd65a1ce16df96e7f979081e0dac93b"],
+                    ['requestUuid        ', airgap.bytesToHex(decoded.requestUuid || new Uint8Array()),
+                                            airgap.bytesToHex(decoded.requestUuid || new Uint8Array()) === "01020304"],
+                ];
+                let ok = true, html = '';
+                for (const [k, v, pass] of checks) {
+                    if (!pass) ok = false;
+                    html += row(k, v, pass ? 'ok' : 'err');
+                }
+                if (ok) c.pass(html); else c.fail(html);
+            } catch (e) {
+                c.fail(`<div class="err">threw: ${e.message || e}</div>`);
+            }
+        })();
+
+        // ── Case 15: Action(VehicleAction(honkHornAction)) — deep
+        //     nesting through Action → VehicleAction → the specific
+        //     command sub-message. This is the inner payload that
+        //     gets encrypted for every CarServer command. ──
+        (async () => {
+            const c = card('Action(VehicleAction.honkHorn) encode');
+            try {
+                const p = await airgap.loadProto();
+                const bytes = airgap.encodeMessage(p.Action, {
+                    vehicleAction: {
+                        vehicleControlHonkHornAction: {},
+                    },
+                });
+                const actual = airgap.bytesToHex(bytes);
+                const ok = actual === ACTION_HONK_HEX;
+                const html = row('expected', ACTION_HONK_HEX) +
+                             row('actual  ', actual, ok ? 'ok' : 'err');
+                if (ok) c.pass(html); else c.fail(html);
+            } catch (e) {
+                c.fail(`<div class="err">threw: ${e.message || e}</div>`);
+            }
+        })();
+
+        // ── Case 16: VCSEC.UnsignedMessage(InformationRequest)
+        //     decode — what the Pi's PollBCS path already speaks. ──
+        (async () => {
+            const c = card('VCSEC.UnsignedMessage(GetStatus) decode');
+            try {
+                const p = await airgap.loadProto();
+                const decoded = airgap.decodeMessage(p.VCSECUnsignedMessage,
+                    airgap.hexToBytes(VCSEC_GET_STATUS_HEX));
+                // The oneof case name protobuf.js synthesises is the
+                // proto field name camelCase'd: InformationRequest.
+                // The inner request type is the default-valued enum
+                // (GET_STATUS = 0) so it's absent on the wire and
+                // therefore missing/undefined after decode — that's
+                // correct proto3 behaviour and what we expect.
+                const hasInfoReq = !!decoded.InformationRequest;
+                const innerType = decoded.InformationRequest?.informationRequestType ?? 0;
+                const ok = hasInfoReq && innerType === 0;
+                const html = row('has InformationRequest', String(hasInfoReq), hasInfoReq ? 'ok' : 'err') +
+                             row('informationRequestType', String(innerType), innerType === 0 ? 'ok' : 'err');
+                if (ok) c.pass(html); else c.fail(html);
+            } catch (e) {
+                c.fail(`<div class="err">threw: ${e.message || e}</div>`);
+            }
+        })();
+    </script>
+</body>
+</html>

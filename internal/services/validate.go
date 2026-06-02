@@ -12,7 +12,7 @@ import (
 // or metacharacter in a string field is a direct rule-injection vector.
 
 var (
-	policyNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9 _-]{0,63}$`)
+	presetNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9 _+/-]{0,63}$`)
 	domainNameRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$`)
 	portSpecRe   = regexp.MustCompile(`^\d{1,5}(-\d{1,5})?$`)
 	macStrictRe  = regexp.MustCompile(`^[0-9a-f]{2}(:[0-9a-f]{2}){5}$`)
@@ -26,11 +26,12 @@ var (
 	}
 )
 
-// ValidPolicyName: letters, digits, space, underscore, hyphen; first char
-// must be alphanumeric; 1-64 chars. Blocks nft metacharacters like `]`,
+// ValidPresetName: letters, digits, space, underscore, hyphen, +, /; first
+// char must be alphanumeric; 1-64 chars. Allows '+' and '/' so "Disney+"
+// and "Apple TV/Music" are spellable. Blocks nft metacharacters like `]`,
 // `\n`, `"`, `;`, `{`, `}`, `#` that would terminate a log prefix string.
-func ValidPolicyName(s string) bool {
-	return policyNameRe.MatchString(s)
+func ValidPresetName(s string) bool {
+	return presetNameRe.MatchString(s)
 }
 
 // ValidDomain: strict RFC-ish hostname check, <=253 chars. Rejects `/`,
@@ -79,6 +80,20 @@ func ValidProtocol(s string) bool {
 // ValidMAC: aa:bb:cc:dd:ee:ff exactly (case-insensitive, lowercased).
 func ValidMAC(s string) bool {
 	return macStrictRe.MatchString(strings.ToLower(s))
+}
+
+// NormalizeDomain lowercases, trims whitespace, strips a leading "*."
+// wildcard, then rejects anything that isn't a strict hostname (no
+// slashes, whitespace or control chars — those would inject into the
+// dnsmasq address=/server= directives we generate). Returns "" for
+// invalid input; callers treat "" as "reject".
+func NormalizeDomain(d string) string {
+	d = strings.ToLower(strings.TrimSpace(d))
+	d = strings.TrimPrefix(d, "*.")
+	if !ValidDomain(d) {
+		return ""
+	}
+	return d
 }
 
 // SanitizeSingleLine strips newlines, carriage returns, and any ASCII

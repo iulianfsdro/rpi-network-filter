@@ -1,0 +1,304 @@
+{{define "title"}}Remote access{{end}}
+
+{{define "content"}}
+<div x-data="remoteApp()" x-init="init()">
+    <div class="page-head">
+        <div>
+            <div class="page-head-eyebrow">
+                <strong>Channel</strong> · Tailscale
+                <span x-show="status.authenticated" style="color:var(--ok);">· connected</span>
+                <span x-show="status.installed && !status.authenticated" style="color:var(--warn);">· needs auth</span>
+                <span x-show="!status.installed" style="color:var(--muted);">· not installed</span>
+            </div>
+            <h1 class="page-head-title">Remote access</h1>
+            <p class="page-head-sub">
+                The Pi sits behind carrier-grade NAT — there's no public IP to point a phone at.
+                Tailscale gives every device a stable <code>.ts.net</code> hostname that works
+                from anywhere. Encrypted (WireGuard), peer-to-peer when possible, free for personal use.
+                Your phone needs the Tailscale app on the same tailnet; reach <strong>/garage</strong> from there.
+            </p>
+        </div>
+        <div class="page-head-right">
+            <button class="btn" @click="loadStatus()" :disabled="busy">
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M14 8a6 6 0 1 0-2 4.5"/><path d="M14 3v4h-4"/></svg>
+                Refresh
+            </button>
+        </div>
+    </div>
+
+    <!-- ── State A: not installed ────────────────────────────────── -->
+    <template x-if="!status.installed">
+        <div class="card">
+            <div class="card-head">
+                <div>
+                    <div class="card-head-title">Install Tailscale</div>
+                    <div class="card-head-sub">~30 seconds · one-time</div>
+                </div>
+            </div>
+            <div class="card-body">
+                <p>
+                    Tailscale isn't on this Pi yet. Clicking <em>Install</em> runs the official
+                    installer (<code>curl -fsSL https://tailscale.com/install.sh | sh</code>),
+                    which adds Tailscale's apt repo, installs the package, and enables
+                    <code>tailscaled</code>. No reboot needed.
+                </p>
+                <div class="form-row" style="margin-top:12px;">
+                    <button class="btn" @click="install()" :disabled="busy">
+                        <span x-text="busy ? 'Installing… (don\'t leave this page)' : 'Install Tailscale'"></span>
+                    </button>
+                </div>
+                <div x-show="installError" class="form-error" x-text="installError"></div>
+            </div>
+        </div>
+    </template>
+
+    <!-- ── State B: installed, not authenticated ────────────────── -->
+    <template x-if="status.installed && !status.authenticated">
+        <div class="card">
+            <div class="card-head">
+                <div>
+                    <div class="card-head-title">Connect to your tailnet</div>
+                    <div class="card-head-sub" x-text="status.backend_state ? 'backend: ' + status.backend_state : 'tailscaled idle'"></div>
+                </div>
+            </div>
+            <div class="card-body">
+                <ol class="ol-steps">
+                    <li>
+                        Open <a href="https://login.tailscale.com/admin/settings/keys" target="_blank" rel="noopener">
+                        login.tailscale.com → Settings → Keys</a> and generate a new auth key.
+                        Mark it <em>reusable</em> if you'll re-pair later;
+                        <em>ephemeral</em> if you want it to disappear when this Pi logs out.
+                    </li>
+                    <li>
+                        Paste the key here. It looks like <code>tskey-auth-xxxxxxxxxxxxx-xxxxxxxx</code>.
+                        We won't store it — Tailscale's daemon keeps its own state under <code>/var/lib/tailscale</code>.
+                        <div class="form-row" style="margin-top:8px;">
+                            <input type="password" class="input mono" placeholder="tskey-auth-…"
+                                   x-model="authKey" style="flex:1; min-width:280px;">
+                            <button class="btn" @click="connect()" :disabled="busy || !authKey">
+                                <span x-text="busy ? 'Connecting…' : 'Connect'"></span>
+                            </button>
+                        </div>
+                    </li>
+                </ol>
+                <div x-show="connectError" class="form-error" x-text="connectError"></div>
+            </div>
+        </div>
+    </template>
+
+    <!-- ── State C: connected ───────────────────────────────────── -->
+    <template x-if="status.authenticated">
+        <div class="card">
+            <div class="card-head">
+                <div>
+                    <div class="card-head-title">Connected</div>
+                    <div class="card-head-sub">Reach this Pi from anywhere using the URL below</div>
+                </div>
+                <span class="card-head-spacer"></span>
+                <span class="badge success">on-tailnet</span>
+            </div>
+            <div class="card-body">
+                <div class="stat-row">
+                    <span>Tailnet hostname</span>
+                    <strong class="mono" x-text="status.tailnet_hostname || '—'"></strong>
+                </div>
+                <div class="stat-row">
+                    <span>Tailnet IPv4</span>
+                    <strong class="mono" x-text="status.tailnet_ipv4 || '—'"></strong>
+                </div>
+                <div class="stat-row">
+                    <span>From your phone (after installing Tailscale)</span>
+                    <strong class="mono">https://<span x-text="status.tailnet_hostname || 'pi.tailXXXX.ts.net'"></span>:8443</strong>
+                </div>
+                <div class="form-row" style="margin-top:16px;">
+                    <button class="btn ghost" @click="logout()" :disabled="busy">
+                        <span x-text="busy ? 'Disconnecting…' : 'Disconnect'"></span>
+                    </button>
+                </div>
+                <div x-show="logoutError" class="form-error" x-text="logoutError"></div>
+            </div>
+        </div>
+    </template>
+
+    <!-- ── State C-extra: BLE Funnel toggle ─────────────────────── -->
+    <template x-if="status.authenticated">
+        <div class="card">
+            <div class="card-head">
+                <div>
+                    <div class="card-head-title">Expose <code style="font-size:14px;">/api/ble</code> publicly</div>
+                    <div class="card-head-sub">
+                        Tailscale Funnel — the byte-forwarder API reachable from anywhere
+                        without installing Tailscale on the client. Bearer-token auth only.
+                    </div>
+                </div>
+                <span class="card-head-spacer"></span>
+                <span class="badge" :class="status.ble_funnel ? 'success' : 'muted'"
+                      x-text="status.ble_funnel ? 'PUBLIC' : 'off'"></span>
+            </div>
+            <div class="card-body">
+                <p style="color:var(--fg-dim); margin:0 0 12px;">
+                    Only <code>/api/ble/*</code> is exposed — the admin web UI
+                    (<code>/garage</code>, <code>/settings</code>, <code>/traffic</code>)
+                    stays Tailscale-only.
+                    Public requests terminate TLS at Tailscale's edge with a Let's Encrypt cert,
+                    travel over WireGuard back to this Pi, and re-issue against
+                    <code>https://localhost:8443/api/ble</code>.
+                    Each external client needs a bearer token issued from
+                    <a href="/settings"><strong>Settings → BLE client tokens</strong></a>.
+                </p>
+                <p style="color:var(--fg-mute); font-size:12.5px; margin:0 0 14px;">
+                    Prerequisites: Funnel must be enabled on your tailnet under
+                    <a href="https://login.tailscale.com/admin/dns/feature-flags" target="_blank" rel="noopener">
+                    admin → DNS → Feature flags</a>. One-time, free for personal use.
+                </p>
+
+                <template x-if="status.ble_funnel">
+                    <div class="stat-row" style="border-bottom:none;">
+                        <span>Public URL</span>
+                        <strong class="mono" x-text="status.ble_funnel_url || '—'"></strong>
+                    </div>
+                </template>
+
+                <div class="form-row" style="margin-top:16px; gap:8px;">
+                    <button class="btn"
+                            x-show="!status.ble_funnel"
+                            @click="enableFunnel()" :disabled="busy">
+                        <span x-text="busy ? 'Enabling…' : 'Expose /api/ble publicly'"></span>
+                    </button>
+                    <button class="btn danger"
+                            x-show="status.ble_funnel"
+                            @click="disableFunnel()" :disabled="busy">
+                        <span x-text="busy ? 'Hiding…' : 'Hide from public internet'"></span>
+                    </button>
+                </div>
+                <div x-show="funnelError" class="form-error" x-text="funnelError"></div>
+            </div>
+        </div>
+    </template>
+
+    <!-- Phone setup hint always-on -->
+    <div class="card">
+        <div class="card-head">
+            <div>
+                <div class="card-head-title">Phone setup</div>
+                <div class="card-head-sub">One-time, ~60s</div>
+            </div>
+        </div>
+        <div class="card-body">
+            <ol class="ol-steps">
+                <li>Install the Tailscale app from the App Store or Play Store.</li>
+                <li>Sign in with the same account that owns the tailnet (where you generated the key).</li>
+                <li>
+                    Open <span class="mono">https://<span x-text="status.tailnet_hostname || 'pi.tailXXXX.ts.net'"></span>:8443</span> in Safari/Chrome.
+                    First visit warns about the self-signed certificate — accept it once,
+                    or download <a href="/netfilter-ca.crt" target="_blank">netfilter-ca.crt</a> and install it
+                    on your phone as a trusted root.
+                </li>
+            </ol>
+        </div>
+    </div>
+</div>
+{{end}}
+
+{{define "scripts"}}
+<script>
+function remoteApp() {
+    return {
+        status: { installed:false, daemon_active:false, authenticated:false, backend_state:'', tailnet_hostname:'', tailnet_ipv4:'', ble_funnel:false, ble_funnel_url:'' },
+        authKey: '',
+        busy: false,
+        installError: '',
+        connectError: '',
+        logoutError: '',
+        funnelError: '',
+
+        async init() {
+            await this.loadStatus();
+            // Poll every 10s — UI states change relatively rarely.
+            this._poll = setInterval(() => this.loadStatus(), 10000);
+        },
+        async loadStatus() {
+            try {
+                this.status = await api.get('/api/remote/status') || this.status;
+            } catch (e) { /* keep stale */ }
+        },
+        async install() {
+            this.installError = '';
+            this.busy = true;
+            try {
+                await api.post('/api/remote/install', {});
+                notify('Tailscale installed ✓', 'success');
+                await this.loadStatus();
+            } catch (e) {
+                this.installError = e.message || 'install failed';
+            } finally {
+                this.busy = false;
+            }
+        },
+        async connect() {
+            this.connectError = '';
+            this.busy = true;
+            try {
+                await api.post('/api/remote/up', { auth_key: this.authKey });
+                notify('Connected to tailnet ✓', 'success');
+                this.authKey = ''; // never linger in the DOM
+                // status reflects "Running" within ~1-2s of `tailscale up` returning
+                await this.loadStatus();
+                setTimeout(() => this.loadStatus(), 2000);
+            } catch (e) {
+                this.connectError = e.message || 'connect failed';
+            } finally {
+                this.busy = false;
+            }
+        },
+        async enableFunnel() {
+            this.funnelError = '';
+            this.busy = true;
+            try {
+                this.status = await api.post('/api/remote/funnel/ble/enable', {});
+                notify('Funnel enabled — /api/ble is public', 'success');
+            } catch (e) {
+                this.funnelError = e.message || 'funnel enable failed';
+            } finally {
+                this.busy = false;
+            }
+        },
+        async disableFunnel() {
+            this.funnelError = '';
+            this.busy = true;
+            try {
+                this.status = await api.post('/api/remote/funnel/ble/disable', {});
+                notify('Funnel disabled — /api/ble is tailnet-only again', 'success');
+            } catch (e) {
+                this.funnelError = e.message || 'funnel disable failed';
+            } finally {
+                this.busy = false;
+            }
+        },
+        async logout() {
+            this.logoutError = '';
+            this.busy = true;
+            try {
+                await api.post('/api/remote/logout', {});
+                notify('Disconnected', 'success');
+                await this.loadStatus();
+            } catch (e) {
+                this.logoutError = e.message || 'logout failed';
+            } finally {
+                this.busy = false;
+            }
+        },
+    };
+}
+</script>
+
+<style>
+.ol-steps { padding-left: 20px; line-height: 1.7; }
+.ol-steps > li { padding: 6px 0; }
+.stat-row { display: flex; justify-content: space-between; align-items: baseline; padding: 8px 0; border-bottom: 1px solid rgba(255,255,255,0.04); gap: 16px; }
+.stat-row:last-child { border-bottom: none; }
+.stat-row strong { font-feature-settings: 'tnum'; text-align: right; word-break: break-all; }
+.form-error { color: var(--danger); margin-top: 12px; font-size: 13px; white-space: pre-wrap; font-family: 'JetBrains Mono', monospace; font-size: 11px; padding: 8px; background: rgba(255, 77, 79, 0.08); border-radius: 6px; }
+.input.mono { font-family: 'JetBrains Mono', monospace; }
+</style>
+{{end}}

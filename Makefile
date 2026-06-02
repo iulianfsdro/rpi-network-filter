@@ -7,9 +7,12 @@ BUILD_DIR=./cmd/netfilterd
 build: deps assets
 	go build -o $(BINARY) $(BUILD_DIR)
 
-# Cross-compile for RPi4 (arm64)
-build-arm: deps assets
-	GOOS=linux GOARCH=arm64 go build -o $(BINARY)-arm64 $(BUILD_DIR)
+# Cross-compile for RPi4 (arm64). Intentionally does NOT depend on `deps`:
+# `go mod tidy` needs Internet, which the deploying Mac doesn't have while
+# joined to the Pi's filtered hotspot. Run `make deps` explicitly when you
+# actually want to refresh go.mod/go.sum.
+build-arm: assets
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o $(BINARY)-arm64 $(BUILD_DIR)
 
 # Download Go dependencies
 deps:

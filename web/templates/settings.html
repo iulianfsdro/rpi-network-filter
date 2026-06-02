@@ -2,104 +2,237 @@
 
 {{define "content"}}
 <div x-data="settingsApp()" x-init="load()">
-    <!-- Hotspot Settings -->
-    <article>
-        <header><h5 style="margin:0;">Hotspot Configuration</h5></header>
-        <div class="grid">
-            <label>
-                SSID (Network Name)
-                <input type="text" x-model="settings.ap_ssid">
-            </label>
-            <label>
-                Password
-                <input type="password" x-model="settings.ap_password">
-            </label>
-            <label>
-                Channel
-                <select x-model="settings.ap_channel">
-                    <option value="1">1</option>
-                    <option value="6">6</option>
-                    <option value="11">11</option>
-                </select>
-            </label>
+    <div class="page-head">
+        <div>
+            <div class="page-head-eyebrow"><strong>System</strong> · appliance configuration</div>
+            <h1 class="page-head-title">Settings</h1>
+            <p class="page-head-sub">
+                Configuration that isn't device- or filter-scoped. Each section saves independently.
+            </p>
         </div>
-        <button @click="saveHotspot()" :aria-busy="saving">Save Hotspot Settings</button>
-        <small style="color:var(--pico-muted-color); display:block; margin-top:0.5rem;">
-            Saving will restart the hotspot. Connected devices will need to reconnect.
-        </small>
-    </article>
+    </div>
 
-    <!-- DNS Settings -->
-    <article>
-        <header><h5 style="margin:0;">DNS Configuration</h5></header>
-        <label>
-            Upstream DNS Servers (comma-separated)
-            <input type="text" x-model="settings.dns_upstream" placeholder="1.1.1.1,8.8.8.8">
-        </label>
-        <button @click="saveDNS()">Save DNS Settings</button>
-    </article>
-
-    <!-- Admin Password -->
-    <article>
-        <header><h5 style="margin:0;">Admin Password</h5></header>
-        <label>
-            New Password (min 8 characters)
-            <input type="password" x-model="newPassword" placeholder="Enter new password">
-        </label>
-        <label>
-            Confirm Password
-            <input type="password" x-model="confirmPassword" placeholder="Confirm new password">
-        </label>
-        <button @click="changePassword()">Change Password</button>
-    </article>
-
-    <!-- TLS / HTTPS -->
-    <article>
-        <header><h5 style="margin:0;">HTTPS Certificate</h5></header>
-        <p style="margin:0 0 0.5rem 0; color:var(--text-muted); font-size:0.85rem;">
-            Install netfilterd's self-signed cert as a trusted root on each
-            device to get green-lock HTTPS. After install, the browser stops
-            warning about the connection.
-        </p>
-        <div style="display:flex; gap:0.5rem; flex-wrap:wrap;">
-            <a href="/netfilter-ca.crt" download="netfilter-ca.crt" role="button" class="outline">Download CA cert</a>
+    <!-- Admin password -->
+    <div class="card">
+        <div class="card-head">
+            <div>
+                <div class="card-head-title">Admin password</div>
+                <div class="card-head-sub">Forces re-authentication on save · 8 char minimum</div>
+            </div>
         </div>
-        <details style="margin-top:0.75rem;">
-            <summary>How to install</summary>
-            <ul style="font-size:0.85rem; color:var(--text-muted);">
-                <li><strong>iOS / iPadOS</strong>: open in Safari → install profile → Settings → General → VPN &amp; Device Management → install + trust → About → Certificate Trust Settings → enable for this cert.</li>
-                <li><strong>macOS</strong>: double-click → Keychain Access → right-click cert → Get Info → Trust → Always Trust.</li>
-                <li><strong>Windows</strong>: double-click → Install Certificate → Local Machine → "Trusted Root Certification Authorities".</li>
-                <li><strong>Android</strong>: Settings → Security → Encryption &amp; credentials → Install a certificate → CA certificate.</li>
-                <li><strong>Chrome on Linux</strong>: chrome://settings/certificates → Authorities → Import.</li>
-            </ul>
-        </details>
-    </article>
-
-    <!-- System Actions -->
-    <article>
-        <header><h5 style="margin:0;">System</h5></header>
-        <div class="btn-group">
-            <button class="outline" style="color:var(--danger);" @click="reboot()">Reboot RPi</button>
+        <div class="card-body">
+            <div class="row stretch" style="gap:14px;">
+                <div class="field" style="flex:1;">
+                    <label class="label">New password</label>
+                    <input class="input" type="password" x-model="newPassword" placeholder="••••••••">
+                </div>
+                <div class="field" style="flex:1;">
+                    <label class="label">Confirm</label>
+                    <input class="input" type="password" x-model="confirmPassword" placeholder="••••••••">
+                </div>
+                <div style="display:flex; align-items:flex-end;">
+                    <button class="btn primary" @click="changePassword()">Save</button>
+                </div>
+            </div>
         </div>
+    </div>
 
-        <!-- Audit Log -->
-        <details style="margin-top:1rem;">
-            <summary>Recent Activity Log</summary>
-            <table>
-                <thead><tr><th>Time</th><th>Action</th><th>Details</th></tr></thead>
+    <!-- Hotspot -->
+    <div class="card">
+        <div class="card-head">
+            <div>
+                <div class="card-head-title">Hotspot</div>
+                <div class="card-head-sub"><code>hostapd</code> regenerated on save · clients disconnect briefly</div>
+            </div>
+        </div>
+        <div class="card-body">
+            <div class="row stretch" style="gap:14px;">
+                <div class="field" style="flex:2;">
+                    <label class="label">SSID</label>
+                    <input class="input" x-model="settings.ap_ssid">
+                </div>
+                <div class="field" style="flex:2;">
+                    <label class="label">Password</label>
+                    <input class="input" type="password" x-model="settings.ap_password">
+                </div>
+                <div class="field" style="flex:1;">
+                    <label class="label">Channel</label>
+                    <select class="select" x-model="settings.ap_channel">
+                        <option value="1">1</option>
+                        <option value="6">6</option>
+                        <option value="11">11</option>
+                    </select>
+                </div>
+                <div style="display:flex; align-items:flex-end;">
+                    <button class="btn primary" @click="saveHotspot()" :disabled="saving" x-text="saving ? 'Saving…' : 'Apply'"></button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- DNS upstream -->
+    <div class="card">
+        <div class="card-head">
+            <div>
+                <div class="card-head-title">DNS upstream</div>
+                <div class="card-head-sub">Used for <code>server=/&lt;allowed&gt;/&lt;upstream&gt;</code> lines and the Open-device DNS DNAT.</div>
+            </div>
+        </div>
+        <div class="card-body">
+            <div class="row stretch" style="gap:14px;">
+                <div class="field" style="flex:1;">
+                    <label class="label">Resolvers — comma separated</label>
+                    <input class="input" x-model="settings.dns_upstream" placeholder="1.1.1.1, 8.8.8.8">
+                </div>
+                <div style="display:flex; align-items:flex-end;">
+                    <button class="btn primary" @click="saveDNS()">Save</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- TLS / CA cert -->
+    <div class="card">
+        <div class="card-head">
+            <div>
+                <div class="card-head-title">HTTPS certificate</div>
+                <div class="card-head-sub">Install on each operator device to silence the browser warning.</div>
+            </div>
+        </div>
+        <div class="card-body">
+            <div class="row">
+                <a href="/netfilter-ca.crt" download="netfilter-ca.crt" class="btn primary">Download CA cert</a>
+                <span style="font-size:12px; color:var(--fg-mute);">After install, the browser shows a green lock at <code>https://192.168.4.1:8443</code>.</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- BLE client tokens — bearer auth for /api/ble/* -->
+    <div class="card">
+        <div class="card-head">
+            <div>
+                <div class="card-head-title">BLE client tokens</div>
+                <div class="card-head-sub">Bearer tokens authorising external clients to drive the car via <code style="font-size:11.5px;">/api/ble/*</code>. The token text is shown once at issue time and never persisted in plaintext.</div>
+            </div>
+            <div class="card-head-spacer"></div>
+            <button class="btn" @click="tokenDialogOpen = true; newTokenName = '';">Issue token</button>
+        </div>
+        <div class="card-body">
+            <table class="tbl">
+                <thead>
+                    <tr>
+                        <th>Name</th>
+                        <th style="width:160px;">Created</th>
+                        <th style="width:160px;">Last used</th>
+                        <th style="width:120px;">Status</th>
+                        <th style="width:100px;" class="right">&nbsp;</th>
+                    </tr>
+                </thead>
                 <tbody>
-                    <template x-for="log in auditLogs" :key="log.id">
+                    <template x-for="t in bleTokens" :key="t.id">
                         <tr>
-                            <td style="font-size:0.8rem;" x-text="new Date(log.timestamp).toLocaleString()"></td>
-                            <td><code x-text="log.action" style="font-size:0.8rem;"></code></td>
-                            <td style="font-size:0.85rem;" x-text="log.details"></td>
+                            <td class="cell-primary" x-text="t.name"></td>
+                            <td class="cell-mac" x-text="new Date(t.created_at).toLocaleString()"></td>
+                            <td class="cell-mac" x-text="t.last_used_at ? new Date(t.last_used_at).toLocaleString() : '—'"></td>
+                            <td>
+                                <span class="badge dot" :class="t.revoked_at ? 'muted' : 'success'"
+                                      x-text="t.revoked_at ? 'revoked' : 'active'"></span>
+                            </td>
+                            <td class="actions">
+                                <button class="btn sm danger"
+                                        x-show="!t.revoked_at"
+                                        @click="revokeToken(t)">Revoke</button>
+                            </td>
                         </tr>
+                    </template>
+                    <template x-if="bleTokens.length === 0">
+                        <tr><td colspan="5" style="text-align:center; color:var(--fg-mute); padding:22px;">No tokens issued yet.</td></tr>
                     </template>
                 </tbody>
             </table>
-        </details>
-    </article>
+        </div>
+    </div>
+
+    <!-- Issue-token dialog -->
+    <div class="dialog-back" x-show="tokenDialogOpen" x-cloak @keydown.escape.window="tokenDialogOpen = false">
+        <div class="dialog">
+            <div class="dialog-head">
+                <div class="dialog-title">Issue BLE client token</div>
+                <button class="dialog-close" @click="tokenDialogOpen = false">&times;</button>
+            </div>
+            <div class="dialog-body">
+                <template x-if="!issuedPlain">
+                    <div>
+                        <label class="label">Client name</label>
+                        <input class="input" x-model="newTokenName" placeholder="ivan's macbook" @keydown.enter="issueToken()" autofocus>
+                        <div class="field-help">Operator-visible label — shows up in audit logs as <code>client:NAME</code>.</div>
+                    </div>
+                </template>
+                <template x-if="issuedPlain">
+                    <div>
+                        <div class="protected-banner" style="background:var(--ok-faint); border-color:var(--ok); color:var(--ok);">
+                            <strong>Save this token now.</strong> It will not be shown again. Copy it into the client app's enrolment screen and store it in your password manager as a backup.
+                        </div>
+                        <label class="label">Token (one-time display)</label>
+                        <textarea class="textarea mono" readonly x-text="issuedPlain" style="min-height:80px; word-break:break-all;"></textarea>
+                        <button class="btn sm" style="margin-top:10px;" @click="copyToken()">Copy to clipboard</button>
+
+                        <label class="label" style="margin-top:18px;">Enrolment URL</label>
+                        <textarea class="textarea mono" readonly x-text="enrolUrl" style="min-height:60px; word-break:break-all;"></textarea>
+                        <div class="form-row" style="gap:8px; margin-top:10px;">
+                            <button class="btn sm" @click="copyEnrolUrl()">Copy URL</button>
+                            <span class="field-help" style="margin-top:0;">Paste this into the client app's <strong>API URL</strong> field — it auto-fills token + nickname.</span>
+                        </div>
+                    </div>
+                </template>
+            </div>
+            <div class="dialog-foot">
+                <template x-if="!issuedPlain">
+                    <div style="display:flex; gap:8px;">
+                        <button class="btn ghost" @click="tokenDialogOpen = false">Cancel</button>
+                        <button class="btn primary" :disabled="!newTokenName.trim()" @click="issueToken()">Issue</button>
+                    </div>
+                </template>
+                <template x-if="issuedPlain">
+                    <button class="btn primary" @click="closeIssueDialog()">Done</button>
+                </template>
+            </div>
+        </div>
+    </div>
+
+    <!-- System read-only info + actions -->
+    <div class="card">
+        <div class="card-head">
+            <div>
+                <div class="card-head-title">System</div>
+                <div class="card-head-sub">Read-only · actions are last-resort</div>
+            </div>
+        </div>
+        <div class="card-body">
+            <button class="btn danger" @click="reboot()">Reboot Pi</button>
+            <div class="section-head">
+                <div>
+                    <div class="section-head-title">Recent activity</div>
+                    <div class="section-head-sub">Most recent audit-log entries</div>
+                </div>
+            </div>
+            <table class="tbl">
+                <thead><tr><th style="width:170px;">Time</th><th style="width:200px;">Action</th><th>Details</th></tr></thead>
+                <tbody>
+                    <template x-for="log in auditLogs" :key="log.id">
+                        <tr>
+                            <td class="cell-mac" x-text="new Date(log.timestamp).toLocaleString()"></td>
+                            <td class="cell-mac" x-text="log.action"></td>
+                            <td><span style="color:var(--fg-dim);" x-text="log.details"></span></td>
+                        </tr>
+                    </template>
+                    <template x-if="auditLogs.length === 0">
+                        <tr><td colspan="3" style="text-align:center; color:var(--fg-mute); padding:22px;">No audit entries yet.</td></tr>
+                    </template>
+                </tbody>
+            </table>
+        </div>
+    </div>
 </div>
 {{end}}
 
@@ -112,45 +245,120 @@ function settingsApp() {
         confirmPassword: '',
         saving: false,
         auditLogs: [],
+
+        // BLE client tokens (V4.4 Phase 1). bleTokens is the rendered
+        // list; tokenDialogOpen drives the issue/display modal;
+        // issuedPlain holds the one-time plaintext returned by POST and
+        // is wiped when the operator dismisses the dialog.
+        bleTokens: [],
+        tokenDialogOpen: false,
+        newTokenName: '',
+        issuedPlain: '',
+        // enrolUrl bundles {api, token, nickname} into a single
+        // airgap://enrol?... URL the operator can copy into the
+        // client app — one-shot enrolment instead of three pastes.
+        // Computed in issueToken() once the plaintext is back.
+        enrolUrl: '',
+
         async load() {
-            this.settings = await api.get('/api/settings');
-            this.auditLogs = await api.get('/api/system/audit');
+            this.settings  = (await api.get('/api/settings'))     || {};
+            this.auditLogs = (await api.get('/api/system/audit')) || [];
+            await this.loadTokens();
+        },
+        async loadTokens() {
+            try {
+                const r = await api.get('/api/tesla/tokens');
+                this.bleTokens = r.tokens || [];
+            } catch (e) { /* api wrapper toasted */ }
+        },
+        async issueToken() {
+            const name = this.newTokenName.trim();
+            if (!name) return;
+            try {
+                const r = await api.post('/api/tesla/tokens', { name });
+                this.issuedPlain = r.plain || '';
+                // Bundle into a single URL for one-paste enrolment on
+                // the client side. The api URL is derived from the
+                // current location (operator is reaching us over
+                // Tailscale, LAN, or Funnel — whichever it is, that's
+                // the URL the client should use).
+                const apiBase = window.location.origin + '/api/ble';
+                const params = new URLSearchParams({
+                    api: apiBase,
+                    token: this.issuedPlain,
+                    nickname: name,
+                });
+                this.enrolUrl = 'airgap://enrol?' + params.toString();
+                await this.loadTokens();
+            } catch (e) { /* api wrapper toasted */ }
+        },
+        async revokeToken(t) {
+            if (!confirm('Revoke "' + t.name + '"? This client will lose access immediately.')) return;
+            try {
+                await api.delete('/api/tesla/tokens/' + t.id);
+                notify('Token revoked', 'success');
+                await this.loadTokens();
+            } catch (e) {}
+        },
+        async copyToken() {
+            try {
+                await navigator.clipboard.writeText(this.issuedPlain);
+                notify('Copied', 'success');
+            } catch (e) {
+                notify('Could not copy — select manually', 'error');
+            }
+        },
+        async copyEnrolUrl() {
+            try {
+                await navigator.clipboard.writeText(this.enrolUrl);
+                notify('Enrolment URL copied', 'success');
+            } catch (e) {
+                notify('Could not copy — select manually', 'error');
+            }
+        },
+        closeIssueDialog() {
+            // Wipe plaintext from JS memory the instant the modal closes.
+            this.issuedPlain = '';
+            this.enrolUrl = '';
+            this.newTokenName = '';
+            this.tokenDialogOpen = false;
         },
         async saveHotspot() {
             this.saving = true;
             try {
                 await api.put('/api/settings', {
-                    ap_ssid: this.settings.ap_ssid,
+                    ap_ssid:     this.settings.ap_ssid,
                     ap_password: this.settings.ap_password,
-                    ap_channel: this.settings.ap_channel
+                    ap_channel:  this.settings.ap_channel,
                 });
                 notify('Hotspot settings saved — restarting AP', 'success');
+            } catch(e) {
             } finally {
                 this.saving = false;
             }
         },
         async saveDNS() {
-            await api.put('/api/settings', { dns_upstream: this.settings.dns_upstream });
-            notify('DNS settings saved', 'success');
+            try {
+                await api.put('/api/settings', { dns_upstream: this.settings.dns_upstream });
+                notify('DNS settings saved', 'success');
+            } catch(e) {}
         },
         async changePassword() {
-            if (this.newPassword.length < 8) {
-                notify('Password must be at least 8 characters', 'error');
-                return;
-            }
-            if (this.newPassword !== this.confirmPassword) {
-                notify('Passwords do not match', 'error');
-                return;
-            }
-            await api.put('/api/settings/password', { password: this.newPassword });
-            notify('Password changed', 'success');
-            this.newPassword = '';
-            this.confirmPassword = '';
+            if (this.newPassword.length < 8)            { notify('Password must be at least 8 characters', 'error'); return; }
+            if (this.newPassword !== this.confirmPassword) { notify('Passwords do not match', 'error'); return; }
+            try {
+                await api.put('/api/settings/password', { password: this.newPassword });
+                notify('Password changed', 'success');
+                this.newPassword = '';
+                this.confirmPassword = '';
+            } catch(e) {}
         },
         async reboot() {
             if (!confirm('Reboot the Raspberry Pi? All connections will be dropped.')) return;
-            await api.post('/api/system/reboot');
-            notify('Rebooting...', 'info');
+            try {
+                await api.post('/api/system/reboot');
+                notify('Rebooting…', 'info');
+            } catch(e) {}
         }
     };
 }
