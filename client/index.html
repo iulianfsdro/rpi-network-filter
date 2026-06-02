@@ -58,7 +58,22 @@
         .stat-tile {
             background: var(--bg-elev); border-radius: var(--radius);
             padding: 22px 24px; display: flex; flex-direction: column; gap: 8px;
+            position: relative;
         }
+        /* Tiny refresh icon in each stat tile's top-right corner.
+           Tesla-style lazy load: each card refreshes itself instead
+           of forcing the user through the global Refresh button. */
+        .stat-tile-refresh {
+            position: absolute; top: 12px; right: 12px;
+            background: transparent; border: 0; cursor: pointer;
+            color: var(--fg-mute); opacity: 0.5;
+            padding: 4px; border-radius: 4px;
+            transition: opacity 0.15s, background 0.15s;
+            display: flex; align-items: center; justify-content: center;
+        }
+        .stat-tile-refresh:hover { opacity: 1; background: var(--bg-elev-2); }
+        .stat-tile-refresh:disabled { opacity: 0.2; cursor: default; }
+        .stat-tile-refresh svg { width: 13px; height: 13px; }
         .stat-tile-label { font-size: 12px; color: var(--fg-mute); }
         .stat-tile-value { font-size: 30px; font-weight: 500; letter-spacing: -0.02em; color: var(--fg); line-height: 1; }
         .stat-tile-value .unit { font-size: 13px; color: var(--fg-mute); font-weight: 400; margin-left: 6px; }
@@ -69,6 +84,44 @@
 
         .row-wrap { display: flex; gap: 8px; flex-wrap: wrap; }
         .meta { color: var(--fg-mute); font-size: 11.5px; }
+
+        /* "as of X ago" — appears under card heads + on stat tiles. */
+        .as-of {
+            font-size: 11px; color: var(--fg-mute);
+            font-feature-settings: "tnum";
+            display: inline-flex; align-items: center; gap: 5px;
+        }
+        .as-of .dot {
+            width: 5px; height: 5px; border-radius: 50%;
+            background: var(--fg-mute);
+        }
+        .as-of.stale .dot { background: var(--warn); }
+
+        /* Pulse highlight when a slice gets a fresh sync. Triggered by
+           the isUpdated flag set in state.js, cleared after ~1.5s. */
+        @keyframes pulse-fresh {
+            0%   { background-color: rgba(80,200,120,0.18); }
+            100% { background-color: transparent; }
+        }
+        .slice-fresh { animation: pulse-fresh 1.4s ease-out; }
+
+        /* Pending — Infotainment field has been written optimistically
+           but not yet confirmed by an awake sync. Small dotted ring. */
+        .pending-mark {
+            font-size: 10px; padding: 1px 6px; border-radius: 10px;
+            border: 1px dashed var(--fg-mute); color: var(--fg-mute);
+            margin-left: 6px; vertical-align: middle;
+            font-feature-settings: "tnum"; letter-spacing: 0.02em;
+        }
+
+        /* Awake/asleep badge on the top bar. */
+        .sleep-badge {
+            font-size: 10.5px; padding: 2px 8px; border-radius: 10px;
+            border: 1px solid var(--line); color: var(--fg-mute);
+            letter-spacing: 0.02em;
+        }
+        .sleep-badge.awake  { color: var(--ok);    border-color: var(--ok); }
+        .sleep-badge.asleep { color: var(--fg-mute); }
 
         [x-cloak] { display: none !important; }
     </style>
@@ -159,10 +212,28 @@
                               :class="vin ? '' : 'warn'"></span>
                         <span x-text="vin ? ('BLE · ' + vin.slice(-6)) : 'no VIN'"></span>
                     </span>
-                    <button class="btn-icon" @click="directRefreshState()" title="Refresh state"
+                    <!-- Sleep flag from VCSEC. AWAKE means infotainment
+                         is currently powered; piggyback syncs will
+                         happen "for free" until the console sleeps. -->
+                    <span class="sleep-badge"
+                          x-show="vs?.vcsec?.sleepStatus"
+                          :class="isAwake ? 'awake' : 'asleep'"
+                          x-text="isAwake ? 'AWAKE' : (isAsleep ? 'ASLEEP' : (vs?.vcsec?.sleepStatus || ''))"
+                          :title="'console state · as of ' + humanAgo(vs?.vcsec?.lastUpdatedAt) + ' (_agoTick=' + _agoTick + ')'"></span>
+                    <button class="btn-icon" @click="directRefreshState()" title="Refresh — wakes the car like the Tesla app"
                             :disabled="directBusy">
                         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14 8a6 6 0 1 0-2 4.5"/><path d="M14 3v4h-4"/></svg>
                     </button>
+                    <!-- Reset BLE: drops cached sessions + clears the
+                         per-VIN queue. Surfaces a "build marker" tag
+                         next to it so you can SEE in the UI whether
+                         the deployed JS matches what's on disk. If
+                         this tag isn't visible, the page is stale —
+                         hard-reload. -->
+                    <button class="btn-icon" @click="resetBle()" title="Force BLE reset — drops cached sessions and clears the queue">
+                        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6"/><path d="M8 4v4l3 2"/></svg>
+                    </button>
+                    <span style="font-size:10px; color:var(--fg-mute); font-family:monospace;" title="If you don't see this tag the page is stale — hard reload">build:s36</span>
                     <button class="btn-icon" @click="forget()" title="Forget this Pi">
                         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="2.2"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3 3l1.5 1.5M11.5 11.5L13 13M3 13l1.5-1.5M11.5 4.5L13 3"/></svg>
                     </button>
@@ -194,29 +265,66 @@
                     </div>
                 </template>
 
-                <!-- Top-level state -->
+                <!-- Top-level state. Each tile shows last-known value
+                     plus an "as of X" footer; the pulse class fires
+                     when a fresh sync writes the slice. -->
                 <div class="grid-3">
-                    <div class="stat-tile">
-                        <div class="stat-tile-label">Battery</div>
-                        <div class="stat-tile-value">
-                            <span x-text="state?.battery?.soc ?? '—'"></span><span class="unit">%</span>
+                    <div class="stat-tile" :class="vs?.charge?.isUpdated ? 'slice-fresh' : ''">
+                        <button class="stat-tile-refresh" @click="directReadCharge()" :disabled="directBusy"
+                                title="Refresh battery (single round-trip)">
+                            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14 8a6 6 0 1 0-2 4.5"/><path d="M14 3v4h-4"/></svg>
+                        </button>
+                        <div class="stat-tile-label">
+                            Battery
+                            <span x-show="vs?.charge?.dirty?.soc || vs?.charge?.dirty?.charge_limit_soc"
+                                  class="pending-mark">pending</span>
                         </div>
-                        <div class="meta" x-text="state?.battery ? ('range ' + (state.battery.range_km != null ? state.battery.range_km + ' km' : '—')) : '—'"></div>
-                    </div>
-                    <div class="stat-tile">
-                        <div class="stat-tile-label">Climate</div>
                         <div class="stat-tile-value">
-                            <span x-text="state?.climate?.inside_temp_c != null ? state.climate.inside_temp_c.toFixed(1) : '—'"></span><span class="unit">°C inside</span>
+                            <span x-text="vs?.charge?.soc ?? '—'"></span><span class="unit">%</span>
                         </div>
-                        <div class="meta" x-text="state?.climate ? ('outside ' + (state.climate.outside_temp_c != null ? state.climate.outside_temp_c.toFixed(1) + '°C' : '—')) : '—'"></div>
+                        <div class="meta" x-text="'range ' + (vs?.charge?.range_km != null ? vs.charge.range_km + ' km' : '—')"></div>
+                        <div class="as-of" :class="vs?.charge?.lastUpdatedAt && (Date.now() - vs.charge.lastUpdatedAt > 300000) ? 'stale' : ''"
+                             x-show="vs?.charge?.lastUpdatedAt">
+                            <span class="dot"></span>
+                            <span x-text="'as of ' + humanAgo(vs?.charge?.lastUpdatedAt) + (_agoTick, '')"></span>
+                        </div>
                     </div>
-                    <div class="stat-tile">
-                        <div class="stat-tile-label">Closures</div>
+                    <div class="stat-tile" :class="vs?.climate?.isUpdated ? 'slice-fresh' : ''">
+                        <button class="stat-tile-refresh" @click="directReadClimate()" :disabled="directBusy"
+                                title="Refresh climate (single round-trip)">
+                            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14 8a6 6 0 1 0-2 4.5"/><path d="M14 3v4h-4"/></svg>
+                        </button>
+                        <div class="stat-tile-label">
+                            Climate
+                            <span x-show="vs?.climate?.dirty?.is_on || vs?.climate?.dirty?.target_temp_c"
+                                  class="pending-mark">pending</span>
+                        </div>
+                        <div class="stat-tile-value">
+                            <span x-text="vs?.climate?.inside_temp_c != null ? vs.climate.inside_temp_c.toFixed(1) : '—'"></span><span class="unit">°C inside</span>
+                        </div>
+                        <div class="meta" x-text="'outside ' + (vs?.climate?.outside_temp_c != null ? vs.climate.outside_temp_c.toFixed(1) + '°C' : '—')"></div>
+                        <div class="as-of" :class="vs?.climate?.lastUpdatedAt && (Date.now() - vs.climate.lastUpdatedAt > 300000) ? 'stale' : ''"
+                             x-show="vs?.climate?.lastUpdatedAt">
+                            <span class="dot"></span>
+                            <span x-text="'as of ' + humanAgo(vs?.climate?.lastUpdatedAt) + (_agoTick, '')"></span>
+                        </div>
+                    </div>
+                    <div class="stat-tile" :class="vs?.vcsec?.isUpdated ? 'slice-fresh' : ''">
+                        <button class="stat-tile-refresh" @click="verifyClosures()" :disabled="directBusy"
+                                title="Refresh locks + closures (cheap VCSEC GET_STATUS, no wake)">
+                            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14 8a6 6 0 1 0-2 4.5"/><path d="M14 3v4h-4"/></svg>
+                        </button>
+                        <div class="stat-tile-label">Locks &amp; closures</div>
                         <div class="stat-tile-value" style="font-size:18px; display:flex; gap:14px; align-items:baseline;">
                             <span :style="locked ? 'color:var(--ok);' : 'color:var(--warn);'"
                                   x-text="locked ? '🔒 locked' : '🔓 unlocked'"></span>
                         </div>
                         <div class="meta" x-text="vin ? ('VIN · ' + vin) : 'VIN not set'"></div>
+                        <div class="as-of" :class="vs?.vcsec?.lastUpdatedAt && (Date.now() - vs.vcsec.lastUpdatedAt > 300000) ? 'stale' : ''"
+                             x-show="vs?.vcsec?.lastUpdatedAt">
+                            <span class="dot"></span>
+                            <span x-text="'as of ' + humanAgo(vs?.vcsec?.lastUpdatedAt) + (_agoTick, '')"></span>
+                        </div>
                     </div>
                 </div>
 
@@ -245,8 +353,12 @@
                         <div>
                             <div class="card-head-title">Climate</div>
                             <div class="card-head-sub">
-                                <span x-text="state?.climate?.is_on ? 'On' : 'Off'"></span> ·
-                                target <span x-text="state?.climate?.target_temp_c != null ? state.climate.target_temp_c.toFixed(1) + '°C' : '—'"></span>
+                                <span x-text="vs?.climate?.is_on ? 'On' : 'Off'"></span> ·
+                                target <span x-text="vs?.climate?.target_temp_c != null ? vs.climate.target_temp_c.toFixed(1) + '°C' : '—'"></span>
+                                <span class="as-of" x-show="vs?.climate?.lastUpdatedAt" style="margin-left:8px;">
+                                    <span class="dot"></span>
+                                    <span x-text="humanAgo(vs?.climate?.lastUpdatedAt) + (_agoTick, '')"></span>
+                                </span>
                             </div>
                         </div>
                     </div>
@@ -273,10 +385,45 @@
                     <div class="card-head">
                         <div>
                             <div class="card-head-title">Closures</div>
-                            <div class="card-head-sub">Front trunk · rear trunk · charge port</div>
+                            <div class="card-head-sub">
+                                Front trunk · rear trunk · charge port
+                                <span class="as-of" x-show="vs?.vcsec?.lastUpdatedAt" style="margin-left:8px;">
+                                    <span class="dot"></span>
+                                    <span x-text="humanAgo(vs?.vcsec?.lastUpdatedAt) + (_agoTick, '')"></span>
+                                </span>
+                            </div>
                         </div>
+                        <div class="card-head-spacer"></div>
+                        <!-- Verify = cheap VCSEC GET_STATUS, no wake.
+                             Tesla's Hall sensors can lag minutes after
+                             manual close; this re-reads them. If still
+                             wrong, Refresh (wakes the car) gets truth
+                             from Infotainment's live signal. -->
+                        <button class="btn sm ghost" @click="verifyClosures()" :disabled="directBusy"
+                                title="Re-read VCSEC (no wake). Use Refresh button on top bar to wake + verify via Infotainment.">
+                            Verify
+                        </button>
                     </div>
                     <div class="card-body">
+                        <!-- Current closure state — each cell shows
+                             VCSEC's latest reading. Closure-sensor lag
+                             can leave these stale for minutes; the
+                             as-of timestamp above is the truth. -->
+                        <div class="row-wrap" style="margin-bottom:14px;">
+                            <!-- closureChips is a STABLE array on the
+                                 model — using an inline literal here
+                                 would create a new array on every
+                                 render, defeating Alpine's keyed
+                                 reuse and re-mounting DOM nodes each
+                                 tick. -->
+                            <template x-for="[label, key] in closureChips" :key="key">
+                                <span class="meta" style="display:inline-flex; gap:6px; padding:5px 10px; border:1px solid var(--line); border-radius:6px;">
+                                    <span x-text="label"></span>
+                                    <strong style="color:var(--fg);"
+                                            x-text="(vs?.vcsec?.closures?.[key] || '—').toLowerCase()"></strong>
+                                </span>
+                            </template>
+                        </div>
                         <div class="row-wrap">
                             <button class="btn ghost" @click="directOpenFrunk()">Open frunk</button>
                             <button class="btn ghost" @click="directOpenTrunk()">Open trunk</button>
@@ -293,8 +440,12 @@
                         <div>
                             <div class="card-head-title">Charging</div>
                             <div class="card-head-sub">
-                                <span x-text="state?.battery?.charging_state ?? 'unknown'"></span> ·
-                                limit <span x-text="state?.battery?.charge_limit_soc ?? '—'"></span>%
+                                <span x-text="vs?.charge?.charging_state ?? 'unknown'"></span> ·
+                                limit <span x-text="vs?.charge?.charge_limit_soc ?? '—'"></span>%
+                                <span class="as-of" x-show="vs?.charge?.lastUpdatedAt" style="margin-left:8px;">
+                                    <span class="dot"></span>
+                                    <span x-text="humanAgo(vs?.charge?.lastUpdatedAt) + (_agoTick, '')"></span>
+                                </span>
                             </div>
                         </div>
                     </div>
@@ -319,13 +470,16 @@
                     </div>
                 </div>
 
-                <!-- Sentry -->
+                <!-- Sentry. The vehicle_state sub-slice that carries
+                     sentry_mode isn't part of our current sync surface
+                     (would need a getVehicleState read added). The
+                     dirty mark surfaces our local intent until then. -->
                 <div class="card">
                     <div class="card-head">
                         <div>
                             <div class="card-head-title">Sentry mode</div>
                             <div class="card-head-sub">
-                                <span x-text="state?.sentry?.is_on ? 'Armed' : 'Idle'"></span>
+                                <span x-text="vs?.sentry?.is_on ? 'Armed' : 'Idle'"></span>
                             </div>
                         </div>
                     </div>
@@ -451,8 +605,8 @@
                                 <div class="form-row" style="gap:10px; margin-bottom:8px;">
                                     <input type="number" step="0.000001" class="input mono" x-model.number="navLat" placeholder="latitude"  style="max-width:180px;">
                                     <input type="number" step="0.000001" class="input mono" x-model.number="navLon" placeholder="longitude" style="max-width:180px;">
-                                    <button class="btn ghost" @click="if(state?.drive){navLat=state.drive.latitude;navLon=state.drive.longitude;}"
-                                            :disabled="!state?.drive">Use car position</button>
+                                    <button class="btn ghost" @click="if(vs?.location?.latitude!=null){navLat=vs.location.latitude;navLon=vs.location.longitude;}"
+                                            :disabled="vs?.location?.latitude == null">Use car position</button>
                                 </div>
                                 <div class="form-row" style="gap:10px;">
                                     <input class="input" x-model="navLabel" placeholder="optional label (e.g. 'Home')" style="max-width:280px;">
@@ -607,6 +761,63 @@
                     </div>
                 </div>
 
+                <!-- Diagnostics — durable activity log so you can see
+                     what happened at the car without DevTools. -->
+                <div class="card" x-data="{ open: false }">
+                    <div class="card-head" @click="open = !open" style="cursor: pointer;">
+                        <div>
+                            <div class="card-head-title">Activity log <span style="color:var(--fg-mute); font-size:11px; font-weight:400;">(<span x-text="airgap.getRecentActivity(100).length"></span> entries)</span></div>
+                            <div class="card-head-sub">Click to <span x-text="open ? 'collapse' : 'expand'"></span>. Persists across reloads — pin failures, retries, and refresh events for the last 100 commands.</div>
+                        </div>
+                        <div class="card-head-spacer"></div>
+                        <span style="color:var(--fg-mute); font-size:18px;" x-text="open ? '▾' : '▸'"></span>
+                    </div>
+                    <div class="card-body" x-show="open" x-cloak>
+                        <div class="row-wrap" style="margin-bottom:12px;">
+                            <button class="btn sm ghost" @click="
+                                const dump = JSON.stringify(airgap.getRecentActivity(100), null, 2);
+                                navigator.clipboard.writeText(dump);
+                                notify('Activity log copied (' + airgap.getRecentActivity(100).length + ' entries)', 'success');
+                            ">Copy as JSON</button>
+                            <button class="btn sm ghost" @click="airgap.clearActivityLog(); notify('Activity log cleared', 'success')">Clear</button>
+                            <span class="meta" style="align-self:center; margin-left:auto;">Most recent first · auto-trimmed to 100</span>
+                        </div>
+                        <table class="tbl">
+                            <thead>
+                                <tr>
+                                    <th style="width:130px;">When</th>
+                                    <th>Label</th>
+                                    <th style="width:60px;">Dom</th>
+                                    <th style="width:50px;">Try</th>
+                                    <th style="width:90px;">Result</th>
+                                    <th style="width:70px;">Fault</th>
+                                    <th style="width:60px;">ms</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <template x-for="(r, i) in airgap.getRecentActivity(50)" :key="r.at + '-' + i">
+                                    <tr>
+                                        <td class="cell-mac" x-text="new Date(r.at).toLocaleTimeString()"></td>
+                                        <td class="cell-mac" x-text="r.label"></td>
+                                        <td class="cell-mac" x-text="r.domain === 2 ? 'VCSEC' : r.domain === 3 ? 'Info' : ''"></td>
+                                        <td class="cell-mac" x-text="r.attempt ?? ''"></td>
+                                        <td>
+                                            <span class="badge"
+                                                  :class="r.result === 'ok' ? 'success' : r.result === 'error' ? 'danger' : 'muted'"
+                                                  x-text="r.result"></span>
+                                        </td>
+                                        <td class="cell-mac" :title="r.note ?? ''" x-text="r.fault != null ? r.fault : ''"></td>
+                                        <td class="cell-mac" x-text="r.durationMs ?? ''"></td>
+                                    </tr>
+                                </template>
+                                <template x-if="airgap.getRecentActivity(1).length === 0">
+                                    <tr><td colspan="7" style="text-align:center; color:var(--fg-mute); padding:22px;">No activity yet. Try a command.</td></tr>
+                                </template>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
                 <!-- This device — token info + self-revoke (Thread E) -->
                 <div class="card">
                     <div class="card-head">
@@ -700,7 +911,9 @@
     <script src="proto.js"></script>
     <script src="crypto.js"></script>
     <script src="session.js"></script>
+    <script src="state.js"></script>
     <script src="keystore.js"></script>
+    <script src="activity-log.js"></script>
     <script src="app.js"></script>
 </body>
 </html>

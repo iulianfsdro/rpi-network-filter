@@ -69,6 +69,13 @@ async function loadProto() {
         const VCSECUnsignedMessage = root.lookupType('VCSEC.UnsignedMessage');
         const InformationRequest   = root.lookupType('VCSEC.InformationRequest');
 
+        // VCSEC inbound surface — the car's reply to a GET_STATUS or to
+        // a closure command. FromVCSECMessage is the top-level wrapper
+        // (one of vehicleStatus, commandStatus, …). VehicleStatus is
+        // the slice we care about: lock/sleep/closures/presence.
+        const FromVCSECMessage = root.lookupType('VCSEC.FromVCSECMessage');
+        const VehicleStatus    = root.lookupType('VCSEC.VehicleStatus');
+
         // Enum lookups so callers can write
         //   airgap.proto.types.Domain.DOMAIN_INFOTAINMENT
         // instead of magic numbers.
@@ -90,6 +97,8 @@ async function loadProto() {
             Response,
             VCSECUnsignedMessage,
             InformationRequest,
+            FromVCSECMessage,
+            VehicleStatus,
             types,
         };
     })();

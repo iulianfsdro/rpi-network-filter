@@ -19,18 +19,28 @@
 // CryptoKey handles, not raw secrets.
 
 const DB_NAME = 'airgap';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const KEY_STORE = 'keys';
+const SESSION_STORE = 'sessions';
 const KEY_ID = 'tesla-device-key';
 
-// openDB is intentionally tiny — we only ever read/write one keyed
-// record. No migrations to worry about (yet); if v2 ever happens we
-// branch on event.oldVersion in onupgradeneeded.
+// openDB handles a tiny upgrade path:
+//   v1 → v2 adds the `sessions` object store for persisted Tesla BLE
+//   session metadata (vehicle ephemeral pubkey + counter + epoch +
+//   clockBase + piSessionId + routingAddress). The AES key is NOT
+//   persisted — it's re-derived on hydration from (long-term private
+//   key, persisted vehicle pubkey), matching Tesla Android's pattern.
 async function openDB() {
     return new Promise((resolve, reject) => {
         const req = indexedDB.open(DB_NAME, DB_VERSION);
-        req.onupgradeneeded = () => {
-            req.result.createObjectStore(KEY_STORE);
+        req.onupgradeneeded = (ev) => {
+            const db = req.result;
+            if (ev.oldVersion < 1) {
+                db.createObjectStore(KEY_STORE);
+            }
+            if (ev.oldVersion < 2) {
+                db.createObjectStore(SESSION_STORE);
+            }
         };
         req.onsuccess = () => resolve(req.result);
         req.onerror = () => reject(req.error);
@@ -125,6 +135,66 @@ function base64ToBytes(b64) {
     return out;
 }
 
+// ── Session metadata persistence ─────────────────────────────────
+//
+// Tesla Android persists `{publicKeyHex, counter, clockTime,
+// epochHex, epochStartSeconds, domain, requestId, handle}` to Realm
+// and rebuilds the AES session key on app launch by re-deriving
+// ECDH+SHA1 against the local private key. We do the equivalent here
+// in IndexedDB: store the vehicle ephemeral pubkey + counter + epoch
+// + clockBase + Pi-side session ID + routing address (and our own
+// pubkey for `signer_identity`), so reloading the page picks up the
+// same session without re-handshaking.
+//
+// Key schema for the SESSION_STORE: `${vin}:${domain}`. We persist
+// per (VIN, domain) because each Tesla domain (VCSEC, Infotainment)
+// has its own ephemeral pubkey and counter.
+
+const _sessionKey = (vin, domain) => `${vin}:${domain}`;
+
+async function saveSessionMetadata(vin, domain, metadata) {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction(SESSION_STORE, 'readwrite');
+        tx.objectStore(SESSION_STORE).put(metadata, _sessionKey(vin, domain));
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+    });
+}
+
+async function loadSessionMetadata(vin, domain) {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction(SESSION_STORE, 'readonly');
+        const req = tx.objectStore(SESSION_STORE).get(_sessionKey(vin, domain));
+        req.onsuccess = () => resolve(req.result || null);
+        req.onerror = () => reject(req.error);
+    });
+}
+
+async function deleteSessionMetadata(vin, domain) {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction(SESSION_STORE, 'readwrite');
+        tx.objectStore(SESSION_STORE).delete(_sessionKey(vin, domain));
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+    });
+}
+
+// clearAllSessionMetadata wipes every persisted session — used by
+// "forget this Pi" and by key rotation (since all old sessions are
+// keyed to the previous private key and won't decrypt anymore).
+async function clearAllSessionMetadata() {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction(SESSION_STORE, 'readwrite');
+        tx.objectStore(SESSION_STORE).clear();
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+    });
+}
+
 // Surface the API on `window` so app.js can pick it up without a
 // module loader. Keeping the bundle build-step-free is a deliberate
 // choice for the v0 client.
@@ -138,4 +208,8 @@ Object.assign(window.airgap, {
     fingerprintHex,
     bytesToBase64,
     base64ToBytes,
+    saveSessionMetadata,
+    loadSessionMetadata,
+    deleteSessionMetadata,
+    clearAllSessionMetadata,
 });

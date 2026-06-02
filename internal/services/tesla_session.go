@@ -155,15 +155,35 @@ func (s *BLESessionService) Open(ctx context.Context, vin string) (*BLESession, 
 	return &BLESession{ID: id, VIN: vin}, nil
 }
 
-// Exchange sends payload over the BLE link and waits up to timeout
-// for one response frame. Caller is responsible for the payload
-// being a well-formed RoutableMessage — the Pi doesn't parse it.
+// Exchange sends payload over the BLE link and returns the response
+// frame addressed to the routing_address (or, when that's absent,
+// the uuid) carried in the outgoing payload. Caller is responsible
+// for the payload being a well-formed RoutableMessage — we DO peek
+// at it (fields 7 and 51) to know what to match against on the way
+// back.
 //
-// The "one response" semantic is right for command/state-read RPCs
-// (which is what 99% of the protocol consists of). For commands that
-// trigger multiple async responses, the client calls Exchange again
-// with an empty payload and a short timeout to drain — or, eventually,
-// we add a streaming endpoint. For Phase 3b's purposes, this is enough.
+// Why we demux rather than returning the first frame: in practice
+// the car often pushes asynchronous frames (VCSEC unsolicited
+// notifications, late responses to prior commands, fragmented
+// responses split across BLE notifications) into the BLE receive
+// channel. A naive "return next frame" semantic delivers those
+// to the caller as if they were the response to the current request,
+// the client's AES-GCM decrypt fails because the AAD's REQUEST_HASH
+// doesn't match, and the user sees a perpetual "Pi returned stale
+// response" / decrypt-failure loop with no way out. Filtering here
+// is the actual fix; the client doesn't have enough information to
+// recover this on its own (each retry just adds another late-frame
+// to the queue).
+//
+// Why route_address is the primary correlator and not request_uuid:
+// the upstream Tesla SDK (internal/dispatcher/dispatcher.go) uses
+// a per-request random routing_address for VCSEC, and only sets
+// request_uuid in responses for NON-VCSEC domains. VCSEC GET_STATUS
+// replies (used by every closure/lock state read) come back with
+// to_destination.routing_address set and request_uuid empty — so a
+// uuid-only filter swallows them and Verify perpetually times out.
+// Matching by to_destination.routing_address works for both VCSEC
+// and Infotainment and for the SessionInfo handshake.
 //
 // Updates lastUsed so the reaper's TTL clock resets.
 func (s *BLESessionService) Exchange(ctx context.Context, id string, payload []byte, timeout time.Duration) ([]byte, error) {
@@ -178,22 +198,210 @@ func (s *BLESessionService) Exchange(ctx context.Context, id string, payload []b
 	if err != nil {
 		return nil, err
 	}
+
+	// Extract correlators from our outgoing RoutableMessage:
+	//   wantAddr = fromDestination.routing_address (field 7 → 2)
+	//   wantUUID = uuid (field 51)
+	// The car copies our fromDestination into the response's
+	// toDestination, and (for non-VCSEC domains) our uuid into
+	// request_uuid. Either is enough to claim the frame as ours.
+	wantAddr := extractRoutableFromRoutingAddress(payload)
+	wantUUID := extractRoutableUUID(payload)
+
+	// Drain any stale frames sitting in the BLE receive channel
+	// before sending the next request — late responses from prior
+	// commands, VCSEC unsolicited broadcasts, fragments. Anything
+	// currently buffered cannot be a response to a request we
+	// haven't sent yet.
+	for drained := 0; ; drained++ {
+		select {
+		case stale, ok := <-sess.conn.Receive():
+			if !ok {
+				return nil, errors.New("BLE connection closed before send")
+			}
+			log.Printf("[BLE-SESSION] drained stale frame %d bytes from %s (count=%d)", len(stale), id, drained+1)
+			continue
+		default:
+		}
+		break
+	}
+
 	if err := sess.conn.Send(ctx, payload); err != nil {
 		return nil, fmt.Errorf("BLE send: %w", err)
 	}
 
-	select {
-	case resp, ok := <-sess.conn.Receive():
-		if !ok {
-			return nil, errors.New("BLE connection closed")
+	deadline := time.After(timeout)
+	for {
+		select {
+		case resp, ok := <-sess.conn.Receive():
+			if !ok {
+				return nil, errors.New("BLE connection closed")
+			}
+			// No correlators in the outgoing request → no
+			// demuxing possible. Return the first frame. This
+			// path is defensive; in normal operation an
+			// outgoing RoutableMessage always carries at
+			// least a routing_address.
+			if len(wantAddr) == 0 && len(wantUUID) == 0 {
+				s.touch(id)
+				return resp, nil
+			}
+			gotAddr := extractRoutableToRoutingAddress(resp)
+			gotUUID := extractRoutableRequestUUID(resp)
+			addrMatch := len(wantAddr) != 0 && bytesEqual(gotAddr, wantAddr)
+			uuidMatch := len(wantUUID) != 0 && bytesEqual(gotUUID, wantUUID)
+			if addrMatch || uuidMatch {
+				s.touch(id)
+				return resp, nil
+			}
+			// Frame is either an unsolicited broadcast (no
+			// matching correlator) or the response to a
+			// previous request. Skip and keep reading.
+			log.Printf("[BLE-SESSION] skipping %d-byte non-matching frame from %s (want_addr=%x want_uuid=%x got_addr=%x got_uuid=%x)",
+				len(resp), id, wantAddr, wantUUID, gotAddr, gotUUID)
+			continue
+		case <-deadline:
+			return nil, ErrBLESessionTimeout
+		case <-ctx.Done():
+			return nil, ctx.Err()
 		}
-		s.touch(id)
-		return resp, nil
-	case <-time.After(timeout):
-		return nil, ErrBLESessionTimeout
-	case <-ctx.Done():
-		return nil, ctx.Err()
 	}
+}
+
+// extractRoutableUUID pulls field 51 (uuid, LEN) out of a
+// RoutableMessage protobuf. Returns nil if not present.
+//
+// Tag for field 51 wire-type 2 (LEN): (51<<3)|2 = 410 = 0x9A 0x03
+// varint-encoded.
+func extractRoutableUUID(buf []byte) []byte {
+	return scanProtoField(buf, 51, 2)
+}
+
+// extractRoutableRequestUUID pulls field 50 (request_uuid, LEN) out
+// of a RoutableMessage protobuf. Returns nil if not present.
+//
+// Tag for field 50 wire-type 2 (LEN): (50<<3)|2 = 402 = 0x92 0x03
+// varint-encoded.
+func extractRoutableRequestUUID(buf []byte) []byte {
+	return scanProtoField(buf, 50, 2)
+}
+
+// extractRoutableFromRoutingAddress pulls
+// from_destination.routing_address out of a RoutableMessage.
+// fromDestination is field 7 (Destination message, LEN); inside
+// it, routing_address is field 2 of the Destination oneof.
+//
+// Returns nil if the sub-field isn't present (e.g. the Destination
+// oneof picked `domain` instead of `routing_address`).
+func extractRoutableFromRoutingAddress(buf []byte) []byte {
+	from := scanProtoField(buf, 7, 2)
+	if from == nil {
+		return nil
+	}
+	return scanProtoField(from, 2, 2)
+}
+
+// extractRoutableToRoutingAddress pulls to_destination.routing_address
+// out of a RoutableMessage. to_destination is field 6.
+func extractRoutableToRoutingAddress(buf []byte) []byte {
+	to := scanProtoField(buf, 6, 2)
+	if to == nil {
+		return nil
+	}
+	return scanProtoField(to, 2, 2)
+}
+
+// scanProtoField walks a top-level protobuf message looking for a
+// specific (fieldNumber, wireType) tag and returns the bytes of the
+// first matching LEN-type field. Skips unknown fields without
+// recursing into sub-messages.
+//
+// Hand-rolled rather than using protobuf.Unmarshal because:
+//  1. We don't want to pull a generated proto descriptor into the
+//     byte-forwarder package, which is meant to be format-agnostic.
+//  2. Decoding the full RoutableMessage would force us to track the
+//     proto file across the upstream SDK, and we'd recompile every
+//     time Tesla added a sub-message we don't care about. A 30-line
+//     wire-format walker is cheap and stable.
+func scanProtoField(buf []byte, fieldNumber, wireType int) []byte {
+	i := 0
+	for i < len(buf) {
+		tag, n := readVarint(buf[i:])
+		if n == 0 {
+			return nil
+		}
+		i += n
+		fn := int(tag >> 3)
+		wt := int(tag & 0x7)
+		if fn == fieldNumber && wt == wireType && wt == 2 {
+			ln, m := readVarint(buf[i:])
+			if m == 0 || i+m+int(ln) > len(buf) {
+				return nil
+			}
+			i += m
+			return buf[i : i+int(ln)]
+		}
+		// Skip the field's payload by wire type.
+		switch wt {
+		case 0: // varint
+			_, m := readVarint(buf[i:])
+			if m == 0 {
+				return nil
+			}
+			i += m
+		case 1: // 64-bit
+			if i+8 > len(buf) {
+				return nil
+			}
+			i += 8
+		case 2: // LEN
+			ln, m := readVarint(buf[i:])
+			if m == 0 || i+m+int(ln) > len(buf) {
+				return nil
+			}
+			i += m + int(ln)
+		case 5: // 32-bit
+			if i+4 > len(buf) {
+				return nil
+			}
+			i += 4
+		default:
+			return nil
+		}
+	}
+	return nil
+}
+
+// readVarint decodes a protobuf varint from buf, returning the value
+// and the number of bytes consumed (0 on truncation).
+func readVarint(buf []byte) (uint64, int) {
+	var v uint64
+	var shift uint
+	for i, b := range buf {
+		v |= uint64(b&0x7F) << shift
+		if b&0x80 == 0 {
+			return v, i + 1
+		}
+		shift += 7
+		if shift >= 64 {
+			return 0, 0
+		}
+	}
+	return 0, 0
+}
+
+// bytesEqual is a tiny equality helper to avoid importing
+// bytes.Equal just for two-byte-slice comparisons.
+func bytesEqual(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // Close removes the session, closes the BLE connection, and releases

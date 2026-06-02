@@ -68,12 +68,138 @@ const ROUTING_ADDRESS_BYTES  = 16;
 const SESSION_INFO_TIMEOUT_MS = 4000;
 const COMMAND_TIMEOUT_MS      = 6000;
 
+// Retry policy constants. Match Tesla Android's `nb0/C24292a.java`:
+// `m99481a(TRANSPORT_BLUETOOTH) = 10` attempts, `m99482b(BLE) = 100`
+// ms delay for transients. Their semantic faults aren't retried at
+// all, ours match.
+const MAX_BLE_ATTEMPTS  = 10;
+const TRANSIENT_DELAY_MS = 100;
+
+// evaluateFault classifies a car-side fault into a retry policy.
+// Mirrors Tesla Android's `nb0/C24292a.java` table per Codex's
+// follow-up findings:
+//
+//   sessionStale: car's view of session is out of sync. Send a
+//     fresh SessionInfoRequest on the same BLE link to refresh
+//     keying material, then retry. ~1 round-trip recovery,
+//     invisible to the user.
+//   transient:    car is busy or had a transient internal error.
+//     Retry directly with a short delay (100ms over BLE per Tesla's
+//     constant) to give the car a moment.
+//   semantic:     command-specific failure that no amount of
+//     retrying will fix (bad parameter, insufficient privileges,
+//     requires encryption that we forgot to ask for, etc.).
+//     Surface to user immediately.
+function evaluateFault(fault) {
+    // Session-stale family. Per Codex's evaluator-table answer:
+    // INVALID_SIGNATURE, INVALID_TOKEN_OR_COUNTER, INCORRECT_EPOCH,
+    // INACTIVE_KEY all flow through Tesla's validation handler and
+    // trigger session-info refresh + retry. TIME_EXPIRED is clock
+    // skew; recoverable by refresh because the refresh restamps
+    // localBaselineMs.
+    if (fault === 4 || fault === 5 || fault === 6 || fault === 15 || fault === 17) {
+        return { category: 'session-stale', retryable: true, delayMs: 0 };
+    }
+    // Transient. BUSY=1 and TIMEOUT=2 are explicit "try again";
+    // INTERNAL=11 is opaque but Tesla retries it too with no
+    // session action.
+    if (fault === 1 || fault === 2 || fault === 11) {
+        return { category: 'transient', retryable: true, delayMs: TRANSIENT_DELAY_MS };
+    }
+    // Semantic — everything else. UNKNOWN_KEY_ID,
+    // INSUFFICIENT_PRIVILEGES, BAD_PARAMETER, INVALID_DOMAINS,
+    // INVALID_COMMAND, DECODING, WRONG_PERSONALIZATION,
+    // KEYCHAIN_IS_FULL, IV_INCORRECT_LENGTH, NOT_PROVISIONED,
+    // COULD_NOT_HASH_METADATA, and REQUIRES_RESPONSE_ENCRYPTION.
+    return { category: 'semantic', retryable: false, delayMs: 0 };
+}
+
 // openDirectSession does the full handshake against `domain` over a
 // fresh BLE session. Returns a session handle holding the AES-GCM
 // CryptoKey, the counter, the epoch, and the clock baseline. The
 // caller must call session.close() when done — the Pi's BLE adapter
 // is single-tenant so leaving sessions open blocks every other BLE
 // path on the Pi.
+// Pi-side BLE sessionId is shared across both domains for a given
+// VIN. Refcount = number of in-memory cached domain sessions
+// referencing that sessionId. The Pi-side DELETE only fires when
+// the LAST reference releases.
+//
+// Why we can do this now: the Pi-side uuid demux (see
+// internal/services/tesla_session.go Exchange) means a shared BLE
+// link is no longer subject to cross-domain frame interleaving —
+// each domain's responses are routed back by request_uuid match.
+// The earlier broken attempt at sharing pre-dated that demux; it
+// failed because a VCSEC unsolicited broadcast could crowd out the
+// Infotainment SessionInfo reply on a shared link. With Pi demux in
+// place, that broadcast is silently skipped on the Pi and the
+// matching frame is delivered.
+//
+// What this buys us: no more sequential close+reopen on every VCSEC
+// ↔ Infotainment domain switch (was ~3-8s per switch), no more 45s
+// POST /sessions blocking on the Pi's per-VIN BLE mutex, both
+// domain sessions ride the same warm BLE link.
+const _piSessionRefcounts = new Map();
+
+function _piSessionAcquire(sessionId) {
+    const rc = (_piSessionRefcounts.get(sessionId) || 0) + 1;
+    _piSessionRefcounts.set(sessionId, rc);
+    return rc;
+}
+
+async function _piSessionRelease(api, sessionId) {
+    const rc = (_piSessionRefcounts.get(sessionId) || 1) - 1;
+    if (rc > 0) {
+        _piSessionRefcounts.set(sessionId, rc);
+        return false; // another domain still holds this Pi session
+    }
+    _piSessionRefcounts.delete(sessionId);
+    try { await api.request('DELETE', `/sessions/${sessionId}`); }
+    catch (e) { console.warn('[airgap] Pi DELETE session failed:', e.message || e); }
+    return true;
+}
+
+// _findOrOpenPiSession returns the Pi-side sessionId to use for the
+// given VIN. Checks in this order:
+//
+//   1. The in-memory _domainCache — if ANY domain already has an
+//      open session for this VIN, reuse its sessionId.
+//   2. IDB-persisted session metadata for either domain on this VIN
+//      (page reload survival).
+//   3. POST /sessions to open a fresh Pi-side BLE link.
+async function _findOrOpenPiSession({ api, vin }) {
+    for (const entry of _domainCache.values()) {
+        if (entry.session?.vin === vin && entry.session?.sessionId) {
+            console.log('[airgap] reusing in-memory Pi session',
+                entry.session.sessionId.slice(0, 8) + '… for vin', vin.slice(-6));
+            return entry.session.sessionId;
+        }
+    }
+    if (airgap.loadSessionMetadata) {
+        for (const d of [DOMAIN_VEHICLE_SECURITY, DOMAIN_INFOTAINMENT]) {
+            try {
+                const meta = await airgap.loadSessionMetadata(vin, d);
+                if (meta?.sessionId) {
+                    console.log('[airgap] reusing IDB-persisted Pi session',
+                        meta.sessionId.slice(0, 8) + '… (from domain ' + d + ')');
+                    return meta.sessionId;
+                }
+            } catch (e) {
+                console.warn('[airgap] IDB lookup failed:', e.message || e);
+            }
+        }
+    }
+    console.log('[airgap] opening fresh Pi-side BLE session for vin', vin.slice(-6));
+    const open = await api.request('POST', '/sessions', { vin });
+    return open.session_id;
+}
+
+async function _bindPiSession({ api, vin }) {
+    const sessionId = await _findOrOpenPiSession({ api, vin });
+    _piSessionAcquire(sessionId);
+    return sessionId;
+}
+
 async function openDirectSession({ api, vin, deviceKeyPair, domain }) {
     if (!vin) throw new Error('openDirectSession: vin required');
     if (!deviceKeyPair?.publicKey || !deviceKeyPair?.privateKey) {
@@ -83,9 +209,13 @@ async function openDirectSession({ api, vin, deviceKeyPair, domain }) {
     const proto = await airgap.loadProto();
     const myPubRaw = await airgap.exportPubkeyRaw(deviceKeyPair.publicKey);
 
-    // 1. Open BLE link via the Pi byte forwarder.
-    const open = await api.request('POST', '/sessions', { vin });
-    const sessionId = open.session_id;
+    // 1. Get or create the Pi-side BLE session for this VIN. Both
+    // domains share the same Pi sessionId — see _piSessionRefcounts
+    // above for why this is safe now that the Pi demuxes by
+    // request_uuid. _bindPiSession bumps the refcount; close() and
+    // the error path below call _piSessionRelease which only tears
+    // down the Pi-side session when the last domain releases.
+    const sessionId = await _bindPiSession({ api, vin });
     const localBaselineMs = Date.now();
 
     try {
@@ -110,23 +240,52 @@ async function openDirectSession({ api, vin, deviceKeyPair, domain }) {
             uuid: challenge,   // ← doubles as the HMAC challenge
         });
 
-        const reqResp = await api.request('POST', `/sessions/${sessionId}/exchange`, {
-            payload_b64: airgap.bytesToBase64(reqBytes),
-            timeout_ms:  SESSION_INFO_TIMEOUT_MS,
-        });
-        const respBytes = airgap.base64ToBytes(reqResp.response_b64);
-        const respMsg   = airgap.decodeMessage(proto.RoutableMessage, respBytes);
+        // The BLE link is shared across domains, so the car may push
+        // an unsolicited VCSEC notification (e.g. WhitelistInfo,
+        // VehicleStatus) into the receive channel right around when
+        // we send our SessionInfoRequest. The Pi drains BEFORE send
+        // but only returns ONE frame after — so a VCSEC notification
+        // that lands first is what we'd see, with the actual
+        // SessionInfo still buffered. The next Exchange will drain
+        // that buffered (now-stale-by-Pi-rules) SessionInfo and
+        // re-send our request. The car responds again with a fresh
+        // SessionInfo. Bounded retry until we win the race.
+        const MAX_SESSION_INFO_ATTEMPTS = 4;
+        let respMsg = null;
+        let lastNonMatchSummary = null;
+        for (let attempt = 1; attempt <= MAX_SESSION_INFO_ATTEMPTS; attempt++) {
+            const reqResp = await api.request('POST', `/sessions/${sessionId}/exchange`, {
+                payload_b64: airgap.bytesToBase64(reqBytes),
+                timeout_ms:  SESSION_INFO_TIMEOUT_MS,
+            });
+            const respBytes = airgap.base64ToBytes(reqResp.response_b64);
+            const candidate = airgap.decodeMessage(proto.RoutableMessage, respBytes);
 
-        // 3. Extract SessionInfo from the response. Domain-aware
-        // routing means the car may also surface session_info via
-        // either the payload oneof or via an unencrypted status —
-        // we expect the payload form for a clean handshake.
-        if (!respMsg.sessionInfo || respMsg.sessionInfo.length === 0) {
-            const keys = Object.keys(respMsg).join(', ');
-            const status = respMsg.signedMessageStatus
-                ? `signed_message_status=${JSON.stringify(respMsg.signedMessageStatus)}`
+            const candidateDomain = candidate.fromDestination?.domain;
+            const hasSessionInfo = candidate.sessionInfo && candidate.sessionInfo.length > 0;
+            if (hasSessionInfo && candidateDomain === domain) {
+                respMsg = candidate;
+                if (attempt > 1) {
+                    console.log('[airgap] SessionInfo handshake succeeded on attempt', attempt, 'for domain', domain);
+                }
+                break;
+            }
+
+            // Wrong frame. Most common cause: VCSEC pushed an
+            // unsolicited notification onto the shared BLE link
+            // between our send and the car's SessionInfo reply.
+            // Log enough detail to recognize the pattern in activity
+            // logs, then retry — the Pi's pre-send drain will toss
+            // the now-stale frame and the car re-replies.
+            const keys = Object.keys(candidate).join(', ');
+            const status = candidate.signedMessageStatus
+                ? ` signedMessageStatus=${JSON.stringify(candidate.signedMessageStatus)}`
                 : '';
-            throw new Error(`expected session_info in response (keys: ${keys}) ${status}`);
+            lastNonMatchSummary = `attempt=${attempt} fromDomain=${candidateDomain} keys=[${keys}]${status}`;
+            console.warn('[airgap] SessionInfo handshake got non-matching frame:', lastNonMatchSummary);
+        }
+        if (!respMsg) {
+            throw new Error(`expected session_info in response after ${MAX_SESSION_INFO_ATTEMPTS} attempts; last: ${lastNonMatchSummary}`);
         }
         const sessionInfoBytes = respMsg.sessionInfo;
         const sessionInfo = airgap.decodeMessage(proto.SessionInfo, sessionInfoBytes);
@@ -190,7 +349,7 @@ async function openDirectSession({ api, vin, deviceKeyPair, domain }) {
         }
         console.log('[airgap] SessionInfo HMAC ✓ (car authenticated)');
 
-        return {
+        const session = {
             sessionId,
             domain,
             vin,
@@ -202,20 +361,300 @@ async function openDirectSession({ api, vin, deviceKeyPair, domain }) {
             // can't find our key and returns BAD_PARAMETER even
             // though the signature itself is valid.
             myPubRaw,
+            // Car's ephemeral pubkey — kept so we can re-derive the
+            // AES session key from IDB-persisted metadata after a
+            // page reload without needing a fresh handshake.
+            vehiclePubRaw: sessionInfo.publicKey,
             epoch:    sessionInfo.epoch,
             counter:  sessionInfo.counter || 0,
             clockBase: sessionInfo.clockTime || 0,
             localBaselineMs,
             close: async () => {
-                try { await api.request('DELETE', `/sessions/${sessionId}`); }
-                catch (e) { console.warn('[airgap] close failed:', e.message || e); }
+                await _piSessionRelease(api, sessionId);
             },
         };
+
+        // Persist metadata so a page reload can resume this session
+        // without re-handshaking. Tesla Android does the same thing.
+        try { await _persistSessionMetadata(session); }
+        catch (e) { console.warn('[airgap] initial session persist failed:', e.message || e); }
+
+        return session;
     } catch (e) {
-        // Best-effort cleanup; never let a cleanup error mask the
-        // root cause.
-        try { await api.request('DELETE', `/sessions/${sessionId}`); } catch {}
+        // Best-effort cleanup; refcounted release so we don't tear
+        // down a Pi session another domain still holds.
+        await _piSessionRelease(api, sessionId).catch(() => {});
         throw e;
+    }
+}
+
+// isTransportDeadError detects errors from the Pi side that mean
+// "the BLE link backing this session is gone — there is no point
+// trying to refetch session info on it because the SessionInfoRequest
+// would hit the same dead pipe." The error string comes from the
+// Tesla SDK's BLE connector wrapped by the Pi's tesla_session.go:
+//
+//   "BLE send: send ATT request failed: io: read/write on closed pipe"
+//   "BLE connection closed"
+//   "BLE-SESSION not found"  (Pi reaped or restarted)
+//
+// Caller (typically _directDo) treats this as "evict + retry with
+// a full handshake against a fresh Pi-side session." This is the
+// correct recovery — a SessionInfoRequest refetch on a dead BLE
+// link is just slower-to-fail.
+function isTransportDeadError(e) {
+    const msg = (e?.message || '').toLowerCase();
+    return msg.includes('closed pipe')
+        || msg.includes('ble send')
+        || msg.includes('ble connection closed')
+        || msg.includes('ble-session')           // Pi-side log prefix on session-gone errors
+        || msg.includes('session not found')
+        || msg.includes('no peripherals')
+        || msg.includes('not connected');
+}
+
+// isStaleFrameError detects the "Pi returned stale response" error
+// thrown when the response's request_uuid doesn't match the request
+// we just sent. Cause: the Pi-side BLE channel buffered a frame from
+// an earlier command (or an unsolicited car-side notification) that
+// landed between Pi's pre-send drain and Send, and Pi returned it as
+// the response to our new request.
+//
+// Distinct from transport-dead: the BLE link is FINE, the session is
+// alive, we just need to retry the command. Pi's pre-send drain on
+// the next Exchange will pop the stale frame; the car re-responds to
+// our retried command (built with a fresh counter+uuid, so no replay
+// risk). Caller (_directDo) treats this as a transient retry — the
+// command itself is unchanged.
+function isStaleFrameError(e) {
+    const msg = (e?.message || '').toLowerCase();
+    return msg.includes('stale response')
+        || msg.includes('stale frame');
+}
+
+// _bytesEqual is a constant-time-ish equality check for Uint8Array
+// values. Used by refetchSessionInfo to detect epoch changes.
+function _bytesEqual(a, b) {
+    if (!a || !b || a.length !== b.length) return false;
+    let diff = 0;
+    for (let i = 0; i < a.length; i++) diff |= a[i] ^ b[i];
+    return diff === 0;
+}
+
+// refetchSessionInfo does an in-place session-info refresh on an
+// already-open BLE session. The Tesla Android app does this exact
+// thing in `xe0/C32376j.java` — when a command comes back with
+// INVALID_SIGNATURE / INVALID_TOKEN_OR_COUNTER / INCORRECT_EPOCH /
+// INACTIVE_KEY, the app sends a fresh SessionInfoRequest on the same
+// BLE connection, gets back a new SessionInfo (new ephemeral pubkey
+// + counter + epoch + clock), re-derives the AES key, and retries
+// the failed command. No BLE link teardown, no full handshake.
+//
+// We mirror that: reuse session.sessionId / session.routingAddress /
+// session.myPubRaw, swap in the new sessionKey / vehiclePubRaw /
+// counter / epoch / clockBase IN PLACE on the same session object,
+// persist the updated metadata. Caller is the reactive-invalidation
+// path in app.js, which retries the command once after a successful
+// refetch.
+//
+// Cost: one BLE round-trip (~200ms-1s warm) instead of the ~5-15s
+// full handshake we'd pay if we evicted + reopened.
+async function refetchSessionInfo({ api, deviceKeyPair, session }) {
+    const proto    = await airgap.loadProto();
+    const challenge = crypto.getRandomValues(new Uint8Array(16));
+
+    const reqBytes = airgap.encodeMessage(proto.RoutableMessage, {
+        toDestination:   { domain: session.domain },
+        fromDestination: { routingAddress: session.routingAddress },
+        sessionInfoRequest: { publicKey: session.myPubRaw },
+        uuid: challenge,
+    });
+
+    // Same shared-BLE-link race as openDirectSession: a VCSEC
+    // unsolicited notification can land on the receive channel
+    // ahead of the actual SessionInfo reply. Retry until we get a
+    // SessionInfo from the expected domain.
+    const MAX_SESSION_INFO_ATTEMPTS = 4;
+    let respMsg = null;
+    let lastNonMatchSummary = null;
+    for (let attempt = 1; attempt <= MAX_SESSION_INFO_ATTEMPTS; attempt++) {
+        const reqResp = await api.request('POST', `/sessions/${session.sessionId}/exchange`, {
+            payload_b64: airgap.bytesToBase64(reqBytes),
+            timeout_ms:  SESSION_INFO_TIMEOUT_MS,
+        });
+        const respBytes = airgap.base64ToBytes(reqResp.response_b64);
+        const candidate = airgap.decodeMessage(proto.RoutableMessage, respBytes);
+
+        const candidateDomain = candidate.fromDestination?.domain;
+        const hasSessionInfo = candidate.sessionInfo && candidate.sessionInfo.length > 0;
+        if (hasSessionInfo && candidateDomain === session.domain) {
+            respMsg = candidate;
+            if (attempt > 1) {
+                console.log('[airgap] refetchSessionInfo succeeded on attempt', attempt, 'for domain', session.domain);
+            }
+            break;
+        }
+
+        const keys = Object.keys(candidate).join(', ');
+        const status = candidate.signedMessageStatus
+            ? ` signedMessageStatus=${JSON.stringify(candidate.signedMessageStatus)}`
+            : '';
+        lastNonMatchSummary = `attempt=${attempt} fromDomain=${candidateDomain} keys=[${keys}]${status}`;
+        console.warn('[airgap] refetchSessionInfo got non-matching frame:', lastNonMatchSummary);
+    }
+    if (!respMsg) {
+        throw new Error(`refetchSessionInfo: expected session_info after ${MAX_SESSION_INFO_ATTEMPTS} attempts; last: ${lastNonMatchSummary}`);
+    }
+    const sessionInfoBytes = respMsg.sessionInfo;
+    const sessionInfo = airgap.decodeMessage(proto.SessionInfo, sessionInfoBytes);
+
+    if (!sessionInfo.publicKey || sessionInfo.publicKey.length !== 65) {
+        throw new Error(`refetchSessionInfo: malformed car pubkey (len ${sessionInfo.publicKey?.length})`);
+    }
+    if (!sessionInfo.epoch || sessionInfo.epoch.length !== 16) {
+        throw new Error(`refetchSessionInfo: malformed epoch (len ${sessionInfo.epoch?.length})`);
+    }
+
+    // Re-derive AES key from (our private key, NEW car ephemeral pubkey).
+    const carEphPub = await airgap.importPeerPubkey(sessionInfo.publicKey);
+    const keyBytes  = await airgap.deriveSessionKeyMaterial(deviceKeyPair.privateKey, carEphPub);
+    const sessionKey = await crypto.subtle.importKey(
+        'raw', keyBytes,
+        { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']
+    );
+
+    // Verify HMAC over the new SessionInfo (same logic as the
+    // initial handshake — proves the response came from the car,
+    // not a MITM byte-forwarder).
+    const receivedTag =
+        respMsg.signatureData?.sessionInfoTag?.tag ||
+        respMsg.signatureData?.session_info_tag?.tag;
+    if (!receivedTag || receivedTag.length === 0) {
+        throw new Error('refetchSessionInfo: missing HMAC tag in response');
+    }
+    const subkey = await airgap.hmacSubkey(keyBytes, 'session info');
+    const verifyMeta = new airgap.MetadataBlockBuilder();
+    verifyMeta.add(airgap.TAG.SIGNATURE_TYPE,  new Uint8Array([airgap.SIGNATURE_TYPE.HMAC]));
+    verifyMeta.add(airgap.TAG.PERSONALIZATION, new TextEncoder().encode(session.vin));
+    verifyMeta.add(airgap.TAG.CHALLENGE,       challenge);
+    const expectedTag = await verifyMeta.hmac(subkey, sessionInfoBytes);
+
+    if (expectedTag.length !== receivedTag.length) {
+        throw new Error(`refetchSessionInfo: HMAC length mismatch`);
+    }
+    let diff = 0;
+    for (let i = 0; i < expectedTag.length; i++) {
+        diff |= expectedTag[i] ^ receivedTag[i];
+    }
+    if (diff !== 0) {
+        throw new Error('refetchSessionInfo: HMAC verification FAILED');
+    }
+
+    // Swap the new keying material IN PLACE on the same session
+    // object. Anything else holding a reference (e.g. an in-flight
+    // command builder waiting on the queue) picks up the new key /
+    // counter / epoch automatically.
+    //
+    // Counter/epoch merge follows Tesla's pattern in
+    // `de0/C15009g.java:303-319`:
+    //   • If the epoch changed → take the new state wholesale.
+    //   • If the epoch is the same → keep the HIGHER of the two
+    //     counters (handles the case where another client has been
+    //     sending commands on the same session).
+    //   • Update `localBaselineMs` only if the new clockTime is at
+    //     least as recent as the old (avoids regressing on a clock
+    //     skew).
+    const epochChanged = !_bytesEqual(session.epoch, sessionInfo.epoch);
+    const newCounter   = sessionInfo.counter || 0;
+    const newClockTime = sessionInfo.clockTime || 0;
+
+    session.sessionKey      = sessionKey;
+    session.keyBytes        = keyBytes;
+    session.vehiclePubRaw   = sessionInfo.publicKey;
+    session.epoch           = sessionInfo.epoch;
+    session.counter         = epochChanged ? newCounter : Math.max(session.counter, newCounter);
+    session.clockBase       = newClockTime;
+    if (epochChanged || newClockTime >= session.clockBase) {
+        session.localBaselineMs = Date.now();
+    }
+
+    // Persist updated metadata so a reload right after refetch picks
+    // up the new keying material, not the stale one.
+    try { await _persistSessionMetadata(session); }
+    catch (e) { console.warn('[airgap] refetch persist failed:', e.message || e); }
+
+    console.log('[airgap] in-place SessionInfo refetch ✓', 'domain=' + session.domain, 'counter=' + session.counter);
+    return session;
+}
+
+// _persistSessionMetadata writes the durable bits of a session to
+// IndexedDB. Everything except the AES key — that's recomputed on
+// hydration from (local long-term private key, vehiclePubRaw).
+async function _persistSessionMetadata(session) {
+    if (!airgap.saveSessionMetadata) return; // keystore not loaded yet
+    await airgap.saveSessionMetadata(session.vin, session.domain, {
+        sessionId:       session.sessionId,
+        vin:             session.vin,
+        domain:          session.domain,
+        routingAddress:  session.routingAddress,
+        myPubRaw:        session.myPubRaw,
+        vehiclePubRaw:   session.vehiclePubRaw,
+        epoch:           session.epoch,
+        counter:         session.counter,
+        clockBase:       session.clockBase,
+        localBaselineMs: session.localBaselineMs,
+        savedAt:         Date.now(),
+    });
+}
+
+// _hydrateSessionFromIdb tries to rebuild a usable session from
+// persisted metadata. Returns null if no metadata exists OR if the
+// metadata can't be turned into a working session (e.g. local
+// private key rotated). The caller falls back to a fresh handshake
+// on null.
+async function _hydrateSessionFromIdb({ api, vin, deviceKeyPair, domain }) {
+    if (!airgap.loadSessionMetadata) return null;
+    const meta = await airgap.loadSessionMetadata(vin, domain);
+    if (!meta) return null;
+
+    try {
+        const carEphPub = await airgap.importPeerPubkey(meta.vehiclePubRaw);
+        const keyBytes  = await airgap.deriveSessionKeyMaterial(deviceKeyPair.privateKey, carEphPub);
+        const sessionKey = await crypto.subtle.importKey(
+            'raw', keyBytes,
+            { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']
+        );
+
+        // Hydration also acquires a refcount on the Pi-side
+        // sessionId, so cross-domain reuse + multi-tab survival
+        // stays accurate after page reload.
+        _piSessionAcquire(meta.sessionId);
+
+        const session = {
+            sessionId:       meta.sessionId,
+            domain:          meta.domain,
+            vin:             meta.vin,
+            routingAddress:  meta.routingAddress,
+            sessionKey,
+            keyBytes,
+            myPubRaw:        meta.myPubRaw,
+            vehiclePubRaw:   meta.vehiclePubRaw,
+            epoch:           meta.epoch,
+            counter:         meta.counter,
+            clockBase:       meta.clockBase,
+            localBaselineMs: meta.localBaselineMs,
+            close: async () => {
+                await _piSessionRelease(api, meta.sessionId);
+            },
+        };
+        console.log('[airgap] hydrated session from IDB:', vin.slice(-6), 'domain=' + domain, 'counter=' + session.counter);
+        return session;
+    } catch (e) {
+        console.warn('[airgap] session hydration failed (will re-handshake):', e.message || e);
+        // Stale metadata (e.g. local key rotated) — wipe it so we
+        // don't keep trying the same bad data.
+        try { await airgap.deleteSessionMetadata(vin, domain); } catch {}
+        return null;
     }
 }
 
@@ -285,8 +724,22 @@ async function sendDirectCommand(session, action) {
 // action builders return ENCODED bytes, not an object, so VCSEC and
 // Infotainment can share this path — they use different proto wrappers
 // inside the ciphertext).
-async function sendDirectCommandWithApi({ api, session, payloadBytes }) {
+async function sendDirectCommandWithApi({ api, session, payloadBytes, flags }) {
+    // Need the proto types for RoutableMessage encode/decode. This
+    // was missing for the entire life of Thread C-2 (the unit-test
+    // suite mocked this function out, so the call site was never
+    // exercised with the real proto path until we hit the car).
+    const proto = await airgap.loadProto();
+
     const actionBytes = payloadBytes;
+    // flags is a bit-field on the RoutableMessage. The only bit we
+    // use is FLAG_ENCRYPT_RESPONSE (bit 1 / value 2), set on
+    // Infotainment state-read requests like getChargeState — the
+    // car otherwise refuses to send the response in the clear and
+    // replies with MESSAGEFAULT_ERROR_REQUIRES_RESPONSE_ENCRYPTION.
+    // The flag MUST appear in both the wire RoutableMessage AND the
+    // AAD metadata so the digests match on both sides.
+    const wireFlags = flags || 0;
 
     if (session.counter >= 0xFFFFFFFE) {
         throw new Error('session counter rolled over — close and re-open');
@@ -303,11 +756,12 @@ async function sendDirectCommandWithApi({ api, session, payloadBytes }) {
         epoch:        session.epoch,
         expiresAt,
         counter,
-        flags:        0,
+        flags:        wireFlags,
     });
 
     const env = await airgap.aesGcmEncrypt(session.sessionKey, actionBytes, aadDigest);
 
+    const requestUuid = crypto.getRandomValues(new Uint8Array(16));
     const cmdRoutable = airgap.encodeMessage(proto.RoutableMessage, {
         toDestination:   { domain: session.domain },
         fromDestination: { routingAddress: session.routingAddress },
@@ -327,7 +781,8 @@ async function sendDirectCommandWithApi({ api, session, payloadBytes }) {
                 tag:       env.tag,
             },
         },
-        uuid: crypto.getRandomValues(new Uint8Array(16)),
+        uuid: requestUuid,
+        flags: wireFlags,
     });
 
     const r = await api.request('POST', `/sessions/${session.sessionId}/exchange`, {
@@ -337,6 +792,64 @@ async function sendDirectCommandWithApi({ api, session, payloadBytes }) {
 
     const respBytes = airgap.base64ToBytes(r.response_b64);
     const respMsg   = airgap.decodeMessage(proto.RoutableMessage, respBytes);
+
+    // The Pi's BLE forwarder reads whatever is next in the receive
+    // channel — if a previous request's response arrived late (after
+    // its timeout), the channel holds that stale response and the
+    // NEXT exchange pulls it. That manifests as: charge succeeds
+    // (first request, channel empty), climate gets back charge's
+    // response, decrypt fails because the request tag the car used
+    // to AAD-encrypt the charge response doesn't match the climate
+    // request's tag we'd use to compute AAD.
+    //
+    // The car echoes our uuid back as request_uuid on the matching
+    // response, so a mismatch here means we received a response to
+    // a DIFFERENT request. Surface it loudly instead of letting it
+    // masquerade as an opaque AES decrypt error.
+    if (respMsg.requestUuid && respMsg.requestUuid.length > 0) {
+        let matches = respMsg.requestUuid.length === requestUuid.length;
+        if (matches) {
+            for (let i = 0; i < requestUuid.length; i++) {
+                if (respMsg.requestUuid[i] !== requestUuid[i]) { matches = false; break; }
+            }
+        }
+        if (!matches) {
+            const sent = airgap.bytesToHex(requestUuid).slice(0, 16);
+            const got  = airgap.bytesToHex(respMsg.requestUuid).slice(0, 16);
+            throw new Error(`Pi returned stale response: sent uuid=${sent}… got request_uuid=${got}… (Pi-side BLE channel has buffered a previous response)`);
+        }
+    }
+
+    // Stale-frame detection for unsolicited car broadcasts that carry
+    // NO request_uuid (the uuid check above can't catch them). Two
+    // signals:
+    //
+    //   1. fromDestination.domain doesn't match the domain we sent to.
+    //      Example: we sent to Infotainment (3) but the Pi returned a
+    //      VCSEC broadcast (2) — a WhitelistOperation_status or
+    //      VehicleStatus push that happened to land in the BLE receive
+    //      channel before our actual reply.
+    //
+    //   2. We requested encrypted-response (FLAG_ENCRYPT_RESPONSE) but
+    //      the frame has no AES_GCM_ResponseData. Either the car sent
+    //      a status-only reply (which would have set signedMessageStatus,
+    //      so let those through) or it's an unsolicited unencrypted
+    //      broadcast (no signedMessageStatus, just protobufMessageAsBytes).
+    //
+    // Both surface as "stale frame" errors so _directDo's retry loop
+    // picks them up. Pi's pre-send drain on the next /exchange tosses
+    // the stale frame; the car re-responds to our retried request.
+    const respFromDomain = respMsg.fromDestination?.domain;
+    if (respFromDomain != null && respFromDomain !== session.domain) {
+        throw new Error(`Pi returned stale frame: expected from domain=${session.domain}, got from domain=${respFromDomain}`);
+    }
+    const isEncryptedRequest = (wireFlags & FLAG_ENCRYPT_RESPONSE_BIT) !== 0;
+    const hasAesGcm = !!respMsg.signatureData?.AES_GCM_ResponseData;
+    const hasPayload = respMsg.protobufMessageAsBytes && respMsg.protobufMessageAsBytes.length > 0;
+    const hasStatus  = !!respMsg.signedMessageStatus;
+    if (isEncryptedRequest && hasPayload && !hasAesGcm && !hasStatus) {
+        throw new Error('Pi returned stale frame: requested encrypted response but got unencrypted payload with no status (unsolicited car broadcast)');
+    }
 
     // Thread C-2: decrypt the payload if present. The car wraps
     // command responses (status, returned data, fault details) in
@@ -374,11 +887,36 @@ async function sendDirectCommandWithApi({ api, session, payloadBytes }) {
                 aadDigest,
             );
         } catch (e) {
-            // Decrypt failed — surface but keep the unencrypted
-            // status so the caller can at least show op_status/fault.
+            // Decrypt failed. The AAD digest mixes in REQUEST_HASH
+            // (sha256 of OUR request's GCM tag) and the response
+            // counter, so a failure on a structurally valid response
+            // means the car AAD'd it against a DIFFERENT request —
+            // i.e. we got back the response to a previous command
+            // that the Pi had buffered. This is the same stale-frame
+            // race as the request_uuid/from-domain mismatches above,
+            // just expressed via the crypto layer instead of plain
+            // metadata. Throw so _directDo's retry loop picks it up.
+            //
+            // We treat this as stale-frame ONLY when we actually
+            // expected an encrypted response (FLAG_ENCRYPT_RESPONSE
+            // set). Without that flag the car may legitimately respond
+            // with status-only and an unrelated AES_GCM tag we
+            // can't decrypt, but the caller doesn't need the
+            // payload anyway.
+            const wasEncryptedRequest = (wireFlags & FLAG_ENCRYPT_RESPONSE_BIT) !== 0;
             console.warn('[airgap] response decrypt failed:', e.message || e);
+            if (wasEncryptedRequest) {
+                throw new Error(`Pi returned stale frame: decrypt failed against this request's AAD (counter=${gcmResp.counter}, requestHash mismatch — channel had a buffered response to a different request)`);
+            }
         }
     }
+
+    // Persist the updated counter (and other mutable bits) so a
+    // page reload picks up where we left off instead of resending
+    // a counter value the car has already seen. Fire-and-forget;
+    // an IDB write delay shouldn't block the command response.
+    _persistSessionMetadata(session).catch(e =>
+        console.warn('[airgap] counter persist failed:', e.message || e));
 
     return { routable: respMsg, decryptedPayload };
 }
@@ -391,63 +929,212 @@ async function sendDirectCommandWithApi({ api, session, payloadBytes }) {
 // for a short idle window; reuse it; close it when the operator
 // leaves or the TTL expires.
 //
-// We DON'T cache across page reloads — a fresh tab opens a new
-// session. IndexedDB persistence would also need to survive the BLE
-// link surviving (which it doesn't — the car closes idle BLE links).
+// Tesla Android keeps the AES shared-secret cache forever (only
+// clears on account change), and persists session metadata to a
+// durable store (Realm) so process restart re-derives the same key
+// without a fresh handshake. We mirror that: NO IDLE TTL on the
+// in-memory cache, AND IndexedDB persistence so reloads pick up
+// where we left off.
+//
+// Invalidation is reactive — the car returns INVALID_SIGNATURE /
+// INVALID_KEY_HANDLE when its side of the session has rotated, and
+// the caller calls evictSession(vin, domain) to drop our copy and
+// re-handshake on the next attempt.
 
-const SESSION_IDLE_TTL_MS = 25_000; // safer than Tesla's ~30s BLE close
-const _domainCache = new Map(); // domain → { session, expiresAt, timer }
+const _domainCache = new Map(); // domain → { session }
 
-// withCachedSession opens a session for `domain` or reuses a cached
-// one. The body runs with the session; if it throws, the cache is
-// invalidated (because we don't know if the session is still good).
-// Idle TTL resets after every successful body.
 async function withCachedSession({ api, vin, deviceKeyPair, domain }, body) {
+    // 1. In-memory cache — instant reuse.
     let entry = _domainCache.get(domain);
-    if (entry && entry.expiresAt > Date.now()) {
+    if (entry) {
         try {
-            const result = await body(entry.session, /*cached*/true);
-            _refreshTtl(entry, domain);
-            return result;
+            return await body(entry.session, /*cached*/true);
         } catch (e) {
-            // Session might be dead — drop the cache and let the
-            // caller retry with a fresh one (or surface the error).
-            _evict(domain);
-            throw e;
+            // Transport-dead errors (Pi-side BLE link gone, session
+            // not found, etc.) → drop the bad session and fall
+            // through to fresh handshake. This is the recovery path
+            // ALL callers benefit from — verifyClosures (vcsecSync),
+            // directRefreshState (awakeSync), the background reader,
+            // and the _directDo retry loop don't need to know.
+            //
+            // Any OTHER exception (fault codes, decrypt failures,
+            // network errors) bubbles up so the caller can decide.
+            if (isTransportDeadError(e)) {
+                console.warn('[airgap] cached session transport dead — evicting + opening fresh:', e.message);
+                await evictSession(vin, domain);
+                // Fall through to handshake below.
+            } else {
+                console.warn('[airgap] in-flight error on cached session:', e.message || e);
+                throw e;
+            }
         }
     }
-    // No live cache. Open fresh.
-    const session = await openDirectSession({ api, vin, deviceKeyPair, domain });
-    entry = { session, expiresAt: 0, timer: null };
-    _domainCache.set(domain, entry);
-    _refreshTtl(entry, domain);
+
+    // 2. IDB hydration — try to rebuild a session from persisted
+    //    metadata. No network, no handshake. ~50ms.
+    const hydrated = await _hydrateSessionFromIdb({ api, vin, deviceKeyPair, domain });
+    if (hydrated) {
+        _domainCache.set(domain, { session: hydrated });
+        try {
+            return await body(hydrated, /*cached*/true);
+        } catch (e) {
+            if (isTransportDeadError(e)) {
+                console.warn('[airgap] hydrated session transport dead — evicting + opening fresh:', e.message);
+                await evictSession(vin, domain);
+                // Fall through to handshake below.
+            } else {
+                console.warn('[airgap] hydrated session failed on first use:', e.message || e);
+                throw e;
+            }
+        }
+    }
+
+    // 3. Cold start — full BLE handshake. ~2-15s depending on radio.
+    //
+    // openDirectSession's first step is _findOrOpenPiSession, which
+    // can return a STALE sessionId from IDB if the cached/hydrated
+    // paths above were never taken (e.g. user clicks global Refresh
+    // after a Pi restart: no cached entry, no Infotainment IDB row,
+    // but a VCSEC IDB row pointing at a long-dead sessionId). The
+    // SessionInfoRequest then immediately 404s with "BLE session
+    // not found" and we'd surface that to the user verbatim.
+    //
+    // Catch transport-dead here too: do a full VIN-scoped evict
+    // (drops every IDB row regardless of sessionId equality) and
+    // retry the cold start exactly once. After evict, IDB is empty,
+    // so _findOrOpenPiSession's next call falls through to a fresh
+    // POST /sessions.
+    let session;
+    try {
+        session = await openDirectSession({ api, vin, deviceKeyPair, domain });
+    } catch (e) {
+        if (!isTransportDeadError(e)) throw e;
+        console.warn('[airgap] cold-start hit stale Pi sessionId — VIN-scoped evict + retry:', e.message || e);
+        await evictSession(vin, domain);
+        session = await openDirectSession({ api, vin, deviceKeyPair, domain });
+    }
+    _domainCache.set(domain, { session });
     try {
         return await body(session, /*cached*/false);
     } catch (e) {
+        // Fresh handshake but the very first command failed —
+        // something fundamental is wrong. Evict and re-raise.
         _evict(domain);
         throw e;
     }
 }
 
-function _refreshTtl(entry, domain) {
-    if (entry.timer) clearTimeout(entry.timer);
-    entry.expiresAt = Date.now() + SESSION_IDLE_TTL_MS;
-    entry.timer = setTimeout(() => _evict(domain), SESSION_IDLE_TTL_MS);
+// refreshCachedSession is the new reactive-invalidation entry point
+// for "session is stale" faults (INVALID_SIGNATURE,
+// INVALID_TOKEN_OR_COUNTER, INCORRECT_EPOCH, INACTIVE_KEY). Tesla
+// Android does NOT tear down the BLE link in these cases — it sends
+// a fresh SessionInfoRequest on the existing BLE session, gets back
+// new keying material, and retries. We do the same.
+//
+// On success: the in-memory session is updated in place with the
+// new key/counter/epoch. The next command rides the same BLE link.
+//
+// On failure (BLE link is genuinely dead, Pi reaped the session,
+// etc.): fall back to evictSession() so the next attempt does a
+// full handshake.
+async function refreshCachedSession({ api, vin, domain, deviceKeyPair }) {
+    const entry = _domainCache.get(domain);
+    if (!entry) {
+        // Nothing to refresh — caller will hit withCachedSession
+        // next time and do a full handshake.
+        return false;
+    }
+    try {
+        await refetchSessionInfo({ api, deviceKeyPair, session: entry.session });
+        return true;
+    } catch (e) {
+        console.warn('[airgap] in-place refresh failed, falling back to full evict:', e.message || e);
+        await evictSession(vin, domain);
+        return false;
+    }
+}
+
+// evictSession is the fallback for "session is genuinely dead, need
+// a full handshake" — both BLE side and crypto side. Drops the
+// in-memory cache AND the IDB rows.
+//
+// Semantics: the unit of liveness is the (VIN, BLE link), NOT
+// (VIN, domain). Both domains share one Pi-side sessionId, so a
+// transport-dead error from any one domain means the BLE link is
+// dead for the whole VIN. We therefore tear down EVERY cached
+// session AND EVERY IDB session metadata row for this VIN —
+// regardless of which sessionId each row references.
+//
+// Why the regardless-of-sessionId-equality matters: in the wild
+// IDB can hold mixed-vintage metadata (e.g. a VCSEC row written
+// before the shared-sessionId model was reintroduced and an
+// Infotainment row written after) where each points at a
+// different sessionId. A stricter "only evict rows whose sessionId
+// matches the dead one" rule leaves the other domain's stale row
+// in place; the next _findOrOpenPiSession walks IDB, finds that
+// row, returns its dead sessionId, hands it to openDirectSession,
+// and the handshake fails identically. We saw this as "Refresh:
+// BLE session not found" surviving 5 clicks in a row.
+//
+// `domain` parameter is preserved as a hint for logging, but the
+// action is VIN-scoped.
+async function evictSession(vin, domain) {
+    // 1. Drop every in-memory cached domain for this VIN. _evict
+    //    triggers session.close() which decrements the refcount;
+    //    any leftover refcount entries are zeroed below.
+    const victims = [];
+    for (const [d, e] of _domainCache.entries()) {
+        if (e.session?.vin === vin) victims.push({ d, sessionId: e.session.sessionId });
+    }
+    for (const v of victims) _evict(v.d);
+
+    // 2. Wipe IDB metadata for BOTH domains on this VIN regardless
+    //    of stored sessionId. Hydration would otherwise resurrect a
+    //    dead reference.
+    if (airgap.deleteSessionMetadata) {
+        for (const d of [DOMAIN_VEHICLE_SECURITY, DOMAIN_INFOTAINMENT]) {
+            try { await airgap.deleteSessionMetadata(vin, d); }
+            catch (e) { console.warn('[airgap] IDB session delete failed:', e.message || e); }
+        }
+    }
+
+    // 3. Zero any leftover refcounts for sessionIds that were
+    //    associated with this VIN, so the next _bindPiSession
+    //    opens fresh instead of pretending a session is still
+    //    live.
+    for (const v of victims) _piSessionRefcounts.delete(v.sessionId);
+
+    console.warn('[airgap] evicted all sessions for vin', vin.slice(-6),
+        '· dropped domains:', victims.map(v => v.d).join(',') || '(none cached)',
+        '· trigger=' + domain);
 }
 
 function _evict(domain) {
     const entry = _domainCache.get(domain);
     if (!entry) return;
-    if (entry.timer) clearTimeout(entry.timer);
     _domainCache.delete(domain);
-    // Best-effort close. The session object holds its own close()
-    // closure that captures its api/sessionId — fire and forget.
+    // Best-effort BLE close. Don't wait — the Pi has its own reaper.
     entry.session.close().catch(() => {});
 }
 
-// closeAllCachedSessions drops every domain's cached session. Called
-// on page unload + on explicit "forget this Pi".
+// closeAllCachedSessions drops every domain's cached in-memory
+// session AND wipes IDB-persisted metadata. Called on "forget this
+// Pi" — NOT on page unload (we want the IDB metadata to survive
+// reloads). Browser beforeunload still calls _evict-only via
+// closeAllInMemoryOnly() below.
 function closeAllCachedSessions() {
+    for (const domain of [..._domainCache.keys()]) {
+        _evict(domain);
+    }
+    try { if (airgap.clearAllSessionMetadata) airgap.clearAllSessionMetadata(); } catch {}
+}
+
+// closeAllInMemoryOnly is the lighter beforeunload path — clears
+// in-memory cache (and sends the BLE close to free the Pi mutex)
+// but LEAVES IDB metadata intact so reload can hydrate. The Pi has
+// its own 5-min reaper so the BLE close on unload is a polite
+// release, not a correctness requirement.
+function closeAllInMemoryOnly() {
     for (const domain of [..._domainCache.keys()]) {
         _evict(domain);
     }
@@ -666,9 +1353,67 @@ async function boomboxAction(sound) {
 // CarServer.Response carrying the requested data. Domain is always
 // Infotainment (the centre console serves these reads).
 
-async function getChargeStateAction()  { return { domain: DOMAIN_INFOTAINMENT, bytes: await _encodeInfotainmentAction({ getVehicleData: { getChargeState:  {} } }) }; }
-async function getClimateStateAction() { return { domain: DOMAIN_INFOTAINMENT, bytes: await _encodeInfotainmentAction({ getVehicleData: { getClimateState: {} } }) }; }
-async function getDriveStateAction()   { return { domain: DOMAIN_INFOTAINMENT, bytes: await _encodeInfotainmentAction({ getVehicleData: { getDriveState:   {} } }) }; }
+// FLAG_ENCRYPT_RESPONSE = 1 (enum value from universal_message.proto).
+// On the wire flags field it's used as a bitmask: bit-position 1, so
+// the integer value to OR in is 1 << 1 = 2. The car returns
+// MESSAGEFAULT_ERROR_REQUIRES_RESPONSE_ENCRYPTION for state reads
+// (getChargeState, getClimateState, getDriveState) when this bit
+// isn't set.
+const FLAG_ENCRYPT_RESPONSE_BIT = 1 << 1;
+
+async function getChargeStateAction()   { return { domain: DOMAIN_INFOTAINMENT, flags: FLAG_ENCRYPT_RESPONSE_BIT, bytes: await _encodeInfotainmentAction({ getVehicleData: { getChargeState:   {} } }) }; }
+async function getClimateStateAction()  { return { domain: DOMAIN_INFOTAINMENT, flags: FLAG_ENCRYPT_RESPONSE_BIT, bytes: await _encodeInfotainmentAction({ getVehicleData: { getClimateState:  {} } }) }; }
+async function getDriveStateAction()    { return { domain: DOMAIN_INFOTAINMENT, flags: FLAG_ENCRYPT_RESPONSE_BIT, bytes: await _encodeInfotainmentAction({ getVehicleData: { getDriveState:    {} } }) }; }
+async function getLocationStateAction() { return { domain: DOMAIN_INFOTAINMENT, flags: FLAG_ENCRYPT_RESPONSE_BIT, bytes: await _encodeInfotainmentAction({ getVehicleData: { getLocationState: {} } }) }; }
+
+// getFullVehicleDataAction is the "awake sync" payload: one BLE round-
+// trip carrying all the Infotainment-domain slices in a single
+// GetVehicleData request. Cheaper than three separate reads when the
+// session is already open, and gives the client a self-consistent
+// snapshot rather than three temporally-skewed ones.
+//
+// Includes getLocationState because Homelink needs the car's current
+// lat/lon — that lives in LocationState, not DriveState (which only
+// carries shift state + speed + active route info).
+async function getFullVehicleDataAction() {
+    return {
+        domain: DOMAIN_INFOTAINMENT,
+        bytes: await _encodeInfotainmentAction({
+            getVehicleData: {
+                getChargeState:   {},
+                getClimateState:  {},
+                getDriveState:    {},
+                getLocationState: {},
+                getClosuresState: {},
+            },
+        }),
+    };
+}
+
+// ─── VCSEC GET_STATUS ───
+//
+// The VCSEC equivalent of "give me current state": wraps an
+// InformationRequest with type GET_STATUS in the VCSEC.UnsignedMessage
+// envelope. Car responds with FromVCSECMessage{ vehicleStatus: ... }
+// carrying lock state, sleep flag, closures, presence — the cheap,
+// no-wake state we can poll continuously.
+//
+// 0 = INFORMATION_REQUEST_TYPE_GET_STATUS (vcsec.proto).
+//
+// Also sets FLAG_ENCRYPT_RESPONSE. The response carries a
+// FromVCSECMessage.vehicleStatus, which we want to decode — so it
+// needs to come back encrypted under our session key. Tesla's
+// Android app sets this flag on essentially all state-read paths;
+// we mirror.
+async function vcsecGetStatusAction() {
+    return {
+        domain: DOMAIN_VEHICLE_SECURITY,
+        flags: FLAG_ENCRYPT_RESPONSE_BIT,
+        bytes: await _encodeVCSECMessage({
+            InformationRequest: { informationRequestType: 0 },
+        }),
+    };
+}
 
 // ─── Defrost + temperature (deferred from Thread C v1) ───
 //
@@ -716,6 +1461,15 @@ Object.assign(window.airgap, {
     sendDirectCommandWithApi,
     withCachedSession,
     closeAllCachedSessions,
+    closeAllInMemoryOnly,
+    evictSession,
+    refreshCachedSession,
+    refetchSessionInfo,
+    evaluateFault,
+    isTransportDeadError,
+    isStaleFrameError,
+    MAX_BLE_ATTEMPTS,
+    TRANSIENT_DELAY_MS,
     DOMAIN_INFOTAINMENT,
     DOMAIN_VEHICLE_SECURITY,
 
@@ -762,5 +1516,9 @@ Object.assign(window.airgap, {
     boomboxAction,
 
     // State reads.
-    getChargeStateAction, getClimateStateAction, getDriveStateAction,
+    getChargeStateAction, getClimateStateAction, getDriveStateAction, getLocationStateAction,
+    getFullVehicleDataAction,
+
+    // VCSEC GET_STATUS (cheap, no-wake state poll).
+    vcsecGetStatusAction,
 });
